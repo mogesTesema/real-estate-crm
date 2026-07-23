@@ -1,0 +1,11 @@
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = ["**/migrations/**"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"]  # DRF/Django default-argument callables are idiomatic
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]  # test data/setup lines are naturally long
