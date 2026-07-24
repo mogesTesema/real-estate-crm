@@ -36,6 +36,7 @@ jobs:
           python-version: "3.13"
       - run: pip install -r requirements-dev.txt
       - run: ruff check .
+      - run: PGPASSWORD=crm psql -U crm -h localhost -d crm -c "ALTER ROLE crm NOSUPERUSER CREATEDB;"
       - run: python manage.py migrate --noinput
       - run: pytest
 
