@@ -88,7 +88,9 @@ class Command(BaseCommand):
                     tenant=tenant, role=Role.AGENT, branch=branch,
                 ))
 
-            pipeline = Pipeline.objects.create(tenant=tenant, name="Residential Sales", is_default=True)
+            pipeline = Pipeline.objects.create(
+                tenant=tenant, name="Residential Sales", is_default=True,
+            )
             stage_defs = [
                 ("New", 10, False, False), ("Contacted", 25, False, False),
                 ("Viewing", 45, False, False), ("Offer", 65, False, False),
@@ -123,12 +125,23 @@ class Command(BaseCommand):
                         ListingStatus.RESERVED, ListingStatus.SOLD, ListingStatus.ACTIVE]
             for i in range(10):
                 beds = random.randint(1, 5)
+                ptype = random.choice(
+                    ['Apartment', 'Villa', 'Townhouse'],
+                )
+                city = random.choice(CITIES)
+                title = f"{beds}BR {ptype}, {city}"
                 prop = Property.objects.create(
-                    tenant=tenant, category=Property.Category.RESIDENTIAL,
-                    title=f"{beds}BR {random.choice(['Apartment', 'Villa', 'Townhouse'])}, {random.choice(CITIES)}",
-                    city=random.choice(CITIES), bedrooms=beds, bathrooms=random.randint(1, beds),
-                    area_built=random.choice([850, 1100, 1600, 2200, 3000]),
-                    owner=random.choice(contacts), custom_fields={"image_url": img(i)},
+                    tenant=tenant,
+                    category=Property.Category.RESIDENTIAL,
+                    title=title,
+                    city=random.choice(CITIES),
+                    bedrooms=beds,
+                    bathrooms=random.randint(1, beds),
+                    area_built=random.choice(
+                        [850, 1100, 1600, 2200, 3000],
+                    ),
+                    owner=random.choice(contacts),
+                    custom_fields={"image_url": img(i)},
                 )
                 listing = Listing.objects.create(
                     tenant=tenant, property=prop, listing_type=Listing.ListingType.SALE,
@@ -138,10 +151,23 @@ class Command(BaseCommand):
                 target = statuses[i % len(statuses)]
                 # walk the state machine to the target status
                 path = {
-                    ListingStatus.ACTIVE: [ListingStatus.ACTIVE],
-                    ListingStatus.UNDER_OFFER: [ListingStatus.ACTIVE, ListingStatus.UNDER_OFFER],
-                    ListingStatus.RESERVED: [ListingStatus.ACTIVE, ListingStatus.UNDER_OFFER, ListingStatus.RESERVED],
-                    ListingStatus.SOLD: [ListingStatus.ACTIVE, ListingStatus.UNDER_OFFER, ListingStatus.SOLD],
+                    ListingStatus.ACTIVE: [
+                        ListingStatus.ACTIVE,
+                    ],
+                    ListingStatus.UNDER_OFFER: [
+                        ListingStatus.ACTIVE,
+                        ListingStatus.UNDER_OFFER,
+                    ],
+                    ListingStatus.RESERVED: [
+                        ListingStatus.ACTIVE,
+                        ListingStatus.UNDER_OFFER,
+                        ListingStatus.RESERVED,
+                    ],
+                    ListingStatus.SOLD: [
+                        ListingStatus.ACTIVE,
+                        ListingStatus.UNDER_OFFER,
+                        ListingStatus.SOLD,
+                    ],
                 }[target]
                 for s in path:
                     change_listing_status(listing=listing, to_status=s, user=admin, reason="seed")
