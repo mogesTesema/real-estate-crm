@@ -1,0 +1,24 @@
+# Render blueprint — single web service (free plan allows one service; no Redis/worker).
+# The SLA sweep runs via `python manage.py sweep_sla` from an external cron instead of Beat.
+# DATABASE_URL must be the crm_app (NON-bypassrls) Neon URL — see backend/.env / the deploy doc.
+services:
+  - type: web
+    name: estatecrm-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /api/schema/
+    preDeployCommand: "python manage.py migrate --noinput && python manage.py collectstatic --noinput && python manage.py seed_demo"
+    envVars:
+      - key: DJANGO_SETTINGS_MODULE
+        value: config.settings.prod
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # Set these two in the Render dashboard (marked sync:false = not stored in git):
+      - key: DATABASE_URL # postgresql://crm_app:...@<neon-host>/neondb?sslmode=require
+        sync: false
+      - key: FRONTEND_ORIGIN # https://<your-app>.vercel.app
+        sync: false
