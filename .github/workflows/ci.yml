@@ -13,11 +13,11 @@ jobs:
         image: postgis/postgis:16-3.4
         env:
           POSTGRES_DB: crm
-          POSTGRES_USER: crm
-          POSTGRES_PASSWORD: crm
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U crm"
+          --health-cmd "pg_isready -U postgres"
           --health-interval 5s --health-timeout 3s --health-retries 10
       redis:
         image: redis:7-alpine
@@ -36,7 +36,13 @@ jobs:
           python-version: "3.13"
       - run: pip install -r requirements-dev.txt
       - run: ruff check .
-      - run: PGPASSWORD=crm psql -U crm -h localhost -d crm -c "ALTER ROLE crm NOSUPERUSER CREATEDB;"
+      - name: Create non-superuser DB role for RLS
+        run: |
+          PGPASSWORD=postgres psql -U postgres -h localhost -d crm -c "
+            CREATE ROLE crm WITH LOGIN PASSWORD 'crm' NOSUPERUSER CREATEDB;
+            ALTER DATABASE crm OWNER TO crm;
+            GRANT ALL ON SCHEMA public TO crm;
+          "
       - run: python manage.py migrate --noinput
       - run: pytest
 
