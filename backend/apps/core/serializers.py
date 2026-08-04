@@ -24,9 +24,13 @@ class CustomFieldsValidationMixin:
             d.key: d
             for d in FieldDefinition.objects.filter(target_model=label)
         }
+        # No tenant field defs yet — allow free-form JSON (image_url, media_order, etc.).
+        if not defs:
+            return value
+        system_keys = {"image_url", "media_order", "cover_media_id"}
         errors = {}
         for key in value:
-            if key not in defs:
+            if key not in defs and key not in system_keys:
                 errors[key] = "Unknown custom field."
         for key, d in defs.items():
             if d.required and key not in value:

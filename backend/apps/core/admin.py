@@ -6,6 +6,7 @@ from .models import (
     Branch,
     Company,
     FieldDefinition,
+    Notification,
     Team,
     Tenant,
     User,
@@ -39,3 +40,4 @@ admin.site.register(Branch)
 admin.site.register(Team)
 admin.site.register(FieldDefinition)
 admin.site.register(AuditLog)
+admin.site.register(Notification)

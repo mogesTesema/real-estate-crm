@@ -72,7 +72,11 @@ class TenantAwareModel(TimeStampedModel):
 # Tenancy root + org hierarchy
 # --------------------------------------------------------------------------- #
 class Tenant(TimeStampedModel):
-    """A SaaS customer (brokerage). Root of isolation; not itself tenant-scoped."""
+    """A  customer (brokerage). Root of isolation; not itself tenant-scoped."""
+
+    class LeadRoutingStrategy(models.TextChoices):
+        ROUND_ROBIN = "round_robin", "Round robin"
+        FIRST_AVAILABLE = "first_available", "First available"
 
     name = models.CharField(max_length=255)
     subdomain = models.SlugField(max_length=63, unique=True)
@@ -81,6 +85,11 @@ class Tenant(TimeStampedModel):
     default_currency = models.CharField(max_length=3, default="USD")
     default_locale = models.CharField(max_length=10, default="en-us")
     timezone = models.CharField(max_length=64, default="UTC")
+    lead_routing_strategy = models.CharField(
+        max_length=32,
+        choices=LeadRoutingStrategy.choices,
+        default=LeadRoutingStrategy.ROUND_ROBIN,
+    )
 
     objects = models.Manager()
 
@@ -248,3 +257,27 @@ class AuditLog(models.Model):
 
     def __str__(self):
         return f"{self.action} {self.model_label}:{self.object_id}"
+
+
+# --------------------------------------------------------------------------- #
+# In-app notifications (SHELL-03 / SRS §3.18)
+# --------------------------------------------------------------------------- #
+class Notification(TenantAwareModel):
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="notifications",
+    )
+    title = models.CharField(max_length=255)
+    body = models.TextField(blank=True)
+    link = models.CharField(max_length=512, blank=True)
+    is_read = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["tenant", "user", "is_read"]),
+        ]
+
+    def __str__(self):
+        return self.title

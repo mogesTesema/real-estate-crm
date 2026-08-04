@@ -253,6 +253,7 @@ _frontend_origin = env("FRONTEND_ORIGIN")
 if _frontend_origin:
     CORS_ALLOWED_ORIGINS.append(_frontend_origin)
 CORS_ALLOW_CREDENTIALS = True
+FRONTEND_ORIGIN = _frontend_origin or "http://localhost:5173"
 
 # --- Integration adapters (plan §2.5) ---------------------------------------
 # Swap these paths for real providers (Twilio, SendGrid) without touching core.

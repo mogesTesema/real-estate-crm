@@ -43,12 +43,13 @@ class RolePermission(BasePermission):
     """
     Object/config-level write gate. Read is open to any authenticated tenant user;
     writes to admin-only viewsets require an admin role. Viewsets opt in by setting
-    ``admin_write = True``.
+    ``admin_write = True``. Optional ``admin_roles`` on the view widens the set.
     """
 
     def has_permission(self, request, view):
         if request.method in SAFE_METHODS:
             return True
         if getattr(view, "admin_write", False):
-            return getattr(request.user, "role", None) in _ADMIN_ROLES
+            allowed = getattr(view, "admin_roles", None) or _ADMIN_ROLES
+            return getattr(request.user, "role", None) in allowed
         return True
