@@ -90,3 +90,21 @@ class Lead(CustomFieldsMixin, TenantAwareModel):
 
     def __str__(self):
         return f"{self.name or self.email or self.phone} ({self.lead_type})"
+
+
+class LeadSource(TenantAwareModel):
+    """Catalog of lead acquisition sources (LEAD-05)."""
+
+    key = models.SlugField(max_length=64)
+    label = models.CharField(max_length=255)
+    is_active = models.BooleanField(default=True)
+    weight = models.PositiveSmallIntegerField(
+        default=10, help_text="Scoring weight contribution (0–100 scale inputs)."
+    )
+
+    class Meta:
+        unique_together = ("tenant", "key")
+        ordering = ["label"]
+
+    def __str__(self):
+        return self.label

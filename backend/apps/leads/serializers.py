@@ -2,7 +2,14 @@ from rest_framework import serializers
 
 from apps.core.serializers import CustomFieldsValidationMixin
 
-from .models import Lead
+from .models import Lead, LeadSource
+
+
+class LeadSourceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LeadSource
+        fields = ["id", "key", "label", "is_active", "weight", "created_at"]
+        read_only_fields = ["created_at"]
 
 
 class LeadSerializer(CustomFieldsValidationMixin, serializers.ModelSerializer):
@@ -73,3 +80,7 @@ class CaptureLeadSerializer(serializers.Serializer):
 class ConvertLeadSerializer(serializers.Serializer):
     pipeline = serializers.UUIDField()
     stage = serializers.UUIDField()
+
+
+class AssignLeadSerializer(serializers.Serializer):
+    assigned_agent = serializers.UUIDField()

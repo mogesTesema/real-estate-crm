@@ -8,13 +8,32 @@ from apps.core.mixins import BaseTenantViewSet
 from apps.deals.models import Pipeline, Stage
 from apps.deals.serializers import OpportunitySerializer
 
-from .models import Lead
+from apps.core.models import Role, User
+
+from .models import Lead, LeadSource
 from .serializers import (
+    AssignLeadSerializer,
     CaptureLeadSerializer,
     ConvertLeadSerializer,
     LeadSerializer,
+    LeadSourceSerializer,
 )
 from .services import capture_lead, convert_lead
+
+
+class LeadSourceViewSet(BaseTenantViewSet):
+    queryset = LeadSource.objects.all().order_by("label")
+    serializer_class = LeadSourceSerializer
+    search_fields = ["key", "label"]
+    filterset_fields = ["is_active"]
+    admin_write = True
+    admin_roles = {
+        Role.SUPER_ADMIN,
+        Role.OWNER,
+        Role.MANAGER,
+        Role.MARKETING,
+    }
+    scope_owner_field = None
 
 
 class LeadViewSet(BaseTenantViewSet):
@@ -64,3 +83,26 @@ class LeadViewSet(BaseTenantViewSet):
         return Response(
             OpportunitySerializer(opp).data, status=http_status.HTTP_201_CREATED
         )
+
+    @action(detail=True, methods=["post"])
+    def assign(self, request, pk=None):
+        """Manually assign / reassign a lead to an agent (SRS §3.1.5)."""
+        lead = self.get_object()
+        ser = AssignLeadSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        agent = get_object_or_404(
+            User.objects.filter(tenant_id=lead.tenant_id, is_active=True),
+            pk=ser.validated_data["assigned_agent"],
+        )
+        lead.assigned_agent = agent
+        lead.save(update_fields=["assigned_agent", "updated_at"])
+        from apps.core.models import Notification
+
+        Notification.objects.create(
+            tenant_id=lead.tenant_id,
+            user_id=agent.id,
+            title="Lead reassigned",
+            body=f"{lead.name or lead.email or 'Lead'} assigned to you",
+            link=f"/leads?id={lead.id}",
+        )
+        return Response(LeadSerializer(lead).data)

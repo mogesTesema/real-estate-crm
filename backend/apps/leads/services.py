@@ -31,7 +31,19 @@ _SOURCE_WEIGHTS = {
 
 def score_lead(lead: Lead) -> int:
     """Rule-based score 0-100 from source, budget presence, and completeness."""
-    score = _SOURCE_WEIGHTS.get(lead.source, 10)
+    from .models import LeadSource
+
+    source_weight = _SOURCE_WEIGHTS.get(lead.source)
+    if source_weight is None and lead.tenant_id:
+        catalog = (
+            LeadSource.objects.filter(
+                tenant_id=lead.tenant_id, key=lead.source, is_active=True
+            )
+            .values_list("weight", flat=True)
+            .first()
+        )
+        source_weight = catalog if catalog is not None else 10
+    score = source_weight if source_weight is not None else 10
     if lead.budget_max:
         score += 20
     if lead.preferred_location:
@@ -53,26 +65,39 @@ def _tenant_agents(tenant_id):
 
 
 def route_lead(lead: Lead, *, strategy: str = "round_robin") -> User | None:
-    """Assign the lead to an agent. Round-robin = fewest active leads first."""
+    """Assign the lead to an agent by tenant strategy."""
     agents = _tenant_agents(lead.tenant_id)
     if not agents.exists():
         return None
-    if strategy == "round_robin":
-        agent = (
-            agents.annotate(
-                active_leads=Count(
-                    "leads",
-                    filter=Q(leads__status__in=["new", "contacted", "qualified"])
-                    & Q(leads__is_deleted=False),
-                )
-            )
-            .order_by("active_leads", "created_at")
-            .first()
+    annotated = agents.annotate(
+        active_leads=Count(
+            "leads",
+            filter=Q(leads__status__in=["new", "contacted", "qualified"])
+            & Q(leads__is_deleted=False),
         )
+    )
+    if strategy == "first_available":
+        free = annotated.filter(active_leads=0).order_by("created_at").first()
+        agent = free or annotated.order_by("active_leads", "created_at").first()
     else:
-        agent = agents.first()
+        # round_robin (default): fewest active leads first
+        agent = annotated.order_by("active_leads", "created_at").first()
     lead.assigned_agent = agent
     return agent
+
+
+def _notify_assignment(lead: Lead) -> None:
+    if not lead.assigned_agent_id:
+        return
+    from apps.core.models import Notification
+
+    Notification.objects.create(
+        tenant_id=lead.tenant_id,
+        user_id=lead.assigned_agent_id,
+        title="New lead assigned",
+        body=f"{lead.name or lead.email or 'Lead'} ({lead.lead_type})",
+        link=f"/leads?id={lead.id}",
+    )
 
 
 # --- Dedupe (SRS §3.1.3, §3.1.10) -------------------------------------------
@@ -130,9 +155,20 @@ def capture_lead(*, tenant_id, data: dict, actor=None) -> Lead:
         )
 
     lead.score = score_lead(lead)
-    route_lead(lead)
+    from apps.core.models import Tenant
+
+    strategy = "round_robin"
+    if tenant_id:
+        strategy = (
+            Tenant.objects.filter(pk=tenant_id)
+            .values_list("lead_routing_strategy", flat=True)
+            .first()
+            or "round_robin"
+        )
+    route_lead(lead, strategy=strategy)
     lead.sla_due_at = timezone.now() + timedelta(minutes=settings.LEAD_SLA_MINUTES)
     lead.save()
+    _notify_assignment(lead)
 
     send_acknowledgment(lead)
     if lead.acknowledged:
