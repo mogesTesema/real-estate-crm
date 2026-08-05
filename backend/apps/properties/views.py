@@ -1,3 +1,5 @@
+from django.db.models import F, FloatField, Value
+from django.db.models.functions import ACos, Cast, Cos, Radians, Sin
 from rest_framework import status as http_status
 from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -22,6 +24,44 @@ class PropertyViewSet(BaseTenantViewSet):
     filterset_fields = ["category", "node_type", "city", "bedrooms", "parent"]
     # Shared inventory: no per-agent ownership scoping (tenant isolation still applies).
     scope_owner_field = None
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        params = self.request.query_params
+        lat = params.get("lat")
+        lng = params.get("lng")
+        radius_km = params.get("radius_km")
+        if lat is None or lng is None or radius_km is None:
+            return qs
+        try:
+            lat_f = float(lat)
+            lng_f = float(lng)
+            radius_f = float(radius_km)
+        except (TypeError, ValueError):
+            return qs
+        if radius_f <= 0:
+            return qs
+
+        # Haversine distance in km; cast Decimal coords to float for type-safe math.
+        lat_col = Cast(F("latitude"), FloatField())
+        lng_col = Cast(F("longitude"), FloatField())
+        qs = qs.filter(latitude__isnull=False, longitude__isnull=False).annotate(
+            distance_km=(
+                Value(6371.0, output_field=FloatField())
+                * ACos(
+                    Cos(Radians(Value(lat_f, output_field=FloatField())))
+                    * Cos(Radians(lat_col))
+                    * Cos(
+                        Radians(lng_col)
+                        - Radians(Value(lng_f, output_field=FloatField()))
+                    )
+                    + Sin(Radians(Value(lat_f, output_field=FloatField())))
+                    * Sin(Radians(lat_col)),
+                    output_field=FloatField(),
+                )
+            )
+        )
+        return qs.filter(distance_km__lte=radius_f)
 
 
 class ListingViewSet(BaseTenantViewSet):

@@ -1,3 +1,4 @@
+from django.utils import timezone
 from rest_framework import serializers
 
 from apps.core.serializers import CustomFieldsValidationMixin
@@ -37,6 +38,7 @@ class OpportunitySerializer(CustomFieldsValidationMixin, serializers.ModelSerial
     custom_fields_model_label = "deals.Opportunity"
     weighted_value = serializers.ReadOnlyField()
     stage_history = OpportunityStageHistorySerializer(many=True, read_only=True)
+    days_in_stage = serializers.SerializerMethodField()
 
     class Meta:
         model = Opportunity
@@ -55,12 +57,22 @@ class OpportunitySerializer(CustomFieldsValidationMixin, serializers.ModelSerial
             "lost_reason",
             "assigned_agent",
             "weighted_value",
+            "days_in_stage",
             "stage_history",
             "custom_fields",
             "created_at",
         ]
         # Stage moves go through /move_stage so history + reason are enforced.
         read_only_fields = ["status", "lost_reason", "created_at"]
+
+    def get_days_in_stage(self, obj) -> int:
+        hist = list(obj.stage_history.all())
+        if hist:
+            latest = max(hist, key=lambda h: h.at)
+            started = latest.at
+        else:
+            started = obj.created_at
+        return max((timezone.now() - started).days, 0)
 
 
 class MoveStageSerializer(serializers.Serializer):

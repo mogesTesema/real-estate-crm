@@ -117,6 +117,13 @@ class Listing(CustomFieldsMixin, TenantAwareModel):
         blank=True,
         related_name="listings",
     )
+    co_listing_agent = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="co_listings",
+    )
     listed_at = models.DateTimeField(null=True, blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)
 

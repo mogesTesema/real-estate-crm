@@ -68,6 +68,7 @@ class ListingSerializer(CustomFieldsValidationMixin, serializers.ModelSerializer
             "price",
             "currency",
             "listing_agent",
+            "co_listing_agent",
             "listed_at",
             "expires_at",
             "media",
