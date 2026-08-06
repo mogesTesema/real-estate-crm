@@ -5,10 +5,9 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.core.mixins import BaseTenantViewSet
+from apps.core.models import Role, User
 from apps.deals.models import Pipeline, Stage
 from apps.deals.serializers import OpportunitySerializer
-
-from apps.core.models import Role, User
 
 from .models import Lead, LeadSource
 from .serializers import (
