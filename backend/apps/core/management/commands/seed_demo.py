@@ -15,7 +15,7 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from apps.contacts.models import Contact, ContactRole
-from apps.core.models import Branch, Company, Role, Tenant, User
+from apps.core.models import Branch, Company, Notification, Role, Tenant, User
 from apps.core.tenancy import tenant_context
 from apps.deals.models import Opportunity, Pipeline, Stage
 from apps.deals.services import move_stage
@@ -23,6 +23,7 @@ from apps.leads.models import Lead
 from apps.leads.services import capture_lead, convert_lead
 from apps.properties.models import Listing, ListingStatus, Property
 from apps.properties.services import change_listing_status
+from apps.activities.models import Activity
 
 IMAGES = [
     "https://images.unsplash.com/photo-1560518883-ce09059eeffa",
@@ -60,8 +61,18 @@ class Command(BaseCommand):
             return
         if existing:
             with tenant_context(existing.id):
-                for model in (Opportunity, Lead, Listing, Property, ContactRole, Contact,
-                              Stage, Pipeline):
+                for model in (
+                    Opportunity,
+                    Lead,
+                    Listing,
+                    Property,
+                    ContactRole,
+                    Contact,
+                    Stage,
+                    Pipeline,
+                    Activity,
+                    Notification,
+                ):
                     model.all_objects.all().delete()
             User.objects.filter(tenant=existing).delete()
             with tenant_context(existing.id):
@@ -70,22 +81,118 @@ class Command(BaseCommand):
             existing.delete()
             self.stdout.write("Removed existing demo tenant.")
 
+        # Clear any orphaned demo logins left by interrupted seeds.
+        demo_emails = [
+            "superadmin@demo.test",
+            "admin@demo.test",
+            "owner@demo.test",
+            "manager@demo.test",
+            "pm@demo.test",
+            "marketing@demo.test",
+            "finance@demo.test",
+            "portal@demo.test",
+            *[f"agent{i}@demo.test" for i in range(1, 6)],
+        ]
+        orphans = list(User.objects.filter(email__in=demo_emails))
+        if orphans:
+            orphan_ids = [u.id for u in orphans]
+            # Activities/notifications may still point at these users across tenants.
+            Activity.all_objects.filter(actor_id__in=orphan_ids).delete()
+            Notification.all_objects.filter(user_id__in=orphan_ids).delete()
+            User.objects.filter(id__in=orphan_ids).delete()
+
         random.seed(42)
         tenant = Tenant.objects.create(name="Demo Realty", subdomain="demo")
+        password = "demo12345"
+
+        # System super admin (tenant-bound so API tenant checks pass for demos).
+        User.objects.create_user(
+            email="superadmin@demo.test",
+            password=password,
+            full_name="Sam Super",
+            tenant=tenant,
+            role=Role.SUPER_ADMIN,
+            is_staff=True,
+            is_superuser=True,
+            mfa_enabled=False,
+        )
+
         admin = User.objects.create_user(
-            email="admin@demo.test", password="demo12345", full_name="Alex Morgan",
-            tenant=tenant, role=Role.OWNER, is_staff=True,
+            email="admin@demo.test",
+            password=password,
+            full_name="Alex Morgan",
+            tenant=tenant,
+            role=Role.OWNER,
+            is_staff=True,
+            mfa_enabled=False,
+        )
+        # Alias login matching the mentor-demo credential list.
+        User.objects.create_user(
+            email="owner@demo.test",
+            password=password,
+            full_name="Alex Morgan (Owner)",
+            tenant=tenant,
+            role=Role.OWNER,
+            is_staff=True,
+            mfa_enabled=False,
         )
 
         with tenant_context(tenant.id):
             company = Company.objects.create(tenant=tenant, name="Demo Realty HQ")
             branch = Branch.objects.create(tenant=tenant, company=company, name="Central Branch")
+
+            User.objects.create_user(
+                email="manager@demo.test",
+                password=password,
+                full_name="Morgan Branch",
+                tenant=tenant,
+                role=Role.MANAGER,
+                branch=branch,
+                mfa_enabled=False,
+            )
+            User.objects.create_user(
+                email="pm@demo.test",
+                password=password,
+                full_name="Pat Property",
+                tenant=tenant,
+                role=Role.PROPERTY_MANAGER,
+                branch=branch,
+                mfa_enabled=False,
+            )
+            User.objects.create_user(
+                email="marketing@demo.test",
+                password=password,
+                full_name="Mia Marketing",
+                tenant=tenant,
+                role=Role.MARKETING,
+                branch=branch,
+                mfa_enabled=False,
+            )
+            User.objects.create_user(
+                email="finance@demo.test",
+                password=password,
+                full_name="Finn Finance",
+                tenant=tenant,
+                role=Role.FINANCE,
+                branch=branch,
+                mfa_enabled=False,
+            )
+            User.objects.create_user(
+                email="portal@demo.test",
+                password=password,
+                full_name="Perry Portal",
+                tenant=tenant,
+                role=Role.PORTAL,
+                mfa_enabled=False,
+            )
+
             agents = [admin]
             for i in range(5):
                 agents.append(User.objects.create_user(
-                    email=f"agent{i + 1}@demo.test", password="demo12345",
+                    email=f"agent{i + 1}@demo.test", password=password,
                     full_name=f"{FIRST[i]} {LAST[i % len(LAST)]}",
                     tenant=tenant, role=Role.AGENT, branch=branch,
+                    mfa_enabled=False,
                 ))
 
             pipeline = Pipeline.objects.create(
@@ -205,4 +312,9 @@ class Command(BaseCommand):
                                reason="Progressing deal", next_action="Follow up")
 
         self.stdout.write(self.style.SUCCESS(
-            "Seeded 'Demo Realty' — login admin@demo.test / demo12345"))
+            "Seeded 'Demo Realty' — role logins (password demo12345):\n"
+            "  superadmin@demo.test  owner@demo.test / admin@demo.test\n"
+            "  manager@demo.test     agent1@demo.test\n"
+            "  pm@demo.test          marketing@demo.test\n"
+            "  finance@demo.test     portal@demo.test"
+        ))
