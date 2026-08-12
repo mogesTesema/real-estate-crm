@@ -126,7 +126,7 @@ class Command(BaseCommand):
             is_staff=True,
             mfa_enabled=False,
         )
-        # Alias login matching the mentor-demo credential list.
+        # Alias login matching the demo credential list.
         User.objects.create_user(
             email="owner@demo.test",
             password=password,
