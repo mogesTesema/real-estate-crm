@@ -91,6 +91,9 @@ class Command(BaseCommand):
             "marketing@demo.test",
             "finance@demo.test",
             "portal@demo.test",
+            "tenant@demo.test",
+            "landlord@demo.test",
+            "buyer@demo.test",
             *[f"agent{i}@demo.test" for i in range(1, 6)],
         ]
         orphans = list(User.objects.filter(email__in=demo_emails))
@@ -181,6 +184,30 @@ class Command(BaseCommand):
                 email="portal@demo.test",
                 password=password,
                 full_name="Perry Portal",
+                tenant=tenant,
+                role=Role.PORTAL,
+                mfa_enabled=False,
+            )
+            User.objects.create_user(
+                email="tenant@demo.test",
+                password=password,
+                full_name="Tessa Tenant",
+                tenant=tenant,
+                role=Role.PORTAL,
+                mfa_enabled=False,
+            )
+            User.objects.create_user(
+                email="landlord@demo.test",
+                password=password,
+                full_name="Larry Landlord",
+                tenant=tenant,
+                role=Role.PORTAL,
+                mfa_enabled=False,
+            )
+            User.objects.create_user(
+                email="buyer@demo.test",
+                password=password,
+                full_name="Bella Buyer",
                 tenant=tenant,
                 role=Role.PORTAL,
                 mfa_enabled=False,
@@ -316,5 +343,6 @@ class Command(BaseCommand):
             "  superadmin@demo.test  owner@demo.test / admin@demo.test\n"
             "  manager@demo.test     agent1@demo.test\n"
             "  pm@demo.test          marketing@demo.test\n"
-            "  finance@demo.test     portal@demo.test"
+            "  finance@demo.test     portal@demo.test (combo)\n"
+            "  tenant@demo.test      landlord@demo.test      buyer@demo.test"
         ))
