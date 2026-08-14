@@ -14,6 +14,7 @@ from datetime import timedelta
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
+from apps.activities.models import Activity
 from apps.contacts.models import Contact, ContactRole
 from apps.core.models import Branch, Company, Notification, Role, Tenant, User
 from apps.core.tenancy import tenant_context
@@ -23,7 +24,6 @@ from apps.leads.models import Lead
 from apps.leads.services import capture_lead, convert_lead
 from apps.properties.models import Listing, ListingStatus, Property
 from apps.properties.services import change_listing_status
-from apps.activities.models import Activity
 
 IMAGES = [
     "https://images.unsplash.com/photo-1560518883-ce09059eeffa",
