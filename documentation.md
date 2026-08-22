@@ -4,10 +4,10 @@ Quick daily notes on what got done on the backend and where things stand. Fronte
 is tracked in the frontend repo's own log and omitted here.
 
 **Current state:** Live API modules — auth/users, contacts, properties/listings, leads,
-pipeline (deals), activities, finance (staff ledger, commissions, VAT), marketing (campaigns,
-drips, landing pages), and portal (own-data client access with isolation) — are wired and
-covered by tests. Seed every role via `python manage.py seed_demo --reset` — password
-`demo12345` for all.
+pipeline (deals), and activities — are wired and covered by tests. Finance, marketing,
+leases, and portal exist only as an in-browser demo-data layer on the frontend; they have no
+backend models or endpoints yet. Seed every role via `python manage.py seed_demo --reset` —
+password `demo12345` for all.
 
 **Demo logins**
 | Email | Role |

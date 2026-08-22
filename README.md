@@ -22,8 +22,9 @@ API over HTTP.
   state machine + history, media upload), **Leads** (capture → dedupe → route → score →
   SLA sweep → acknowledge → convert), **Pipeline** (Opportunities, Kanban board,
   mandatory-reason stage moves), **unified activity timeline**.
-- **Finance** (staff ledger, commissions, VAT), **Marketing** (campaigns, drips, landing
-  pages), **Portal** (own-data client access with isolation).
+
+Finance, marketing, leases, and portal are not backend apps yet — they currently exist only
+as an in-browser demo-data layer on the frontend.
 
 ## Run it
 
@@ -53,7 +54,7 @@ docker compose run --rm backend ruff check .
 
 ```
 backend/   Django project (config/) + domain apps (apps/core, contacts, properties,
-           leads, deals, activities, finance, marketing, portal, integrations)
+           leads, deals, activities, integrations)
 deploy/    postgres-init.sql and related deploy helpers
 ```
 
