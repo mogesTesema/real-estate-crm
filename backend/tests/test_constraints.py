@@ -429,3 +429,222 @@ def test_one_vendor_profile_per_contact(db):
     Vendor.objects.create(contact=contact, service_category="Plumbing")
     with pytest.raises(IntegrityError):
         Vendor.objects.create(contact=contact, service_category="Electrical")
+
+
+# --- finance (§11) ----------------------------------------------------------
+
+
+@pytest.fixture
+def account(db):
+    from apps.finance.models import Account
+
+    return Account.objects.create(
+        name="Operating", account_type=Account.AccountType.OPERATING_ACCOUNT, currency="AED"
+    )
+
+
+def make_invoice(user, **kwargs):
+    from apps.finance.models import Invoice
+
+    kwargs.setdefault("invoice_number", f"INV-{Invoice.objects.count() + 1:05d}")
+    kwargs.setdefault("contact", make_contact())
+    kwargs.setdefault("invoice_type", Invoice.InvoiceType.RENT)
+    kwargs.setdefault("issue_date", "2026-01-01")
+    kwargs.setdefault("due_date", "2026-02-01")
+    kwargs.setdefault("subtotal", 1000)
+    kwargs.setdefault("total_amount", 1000)
+    kwargs.setdefault("amount_paid", 0)
+    kwargs.setdefault("balance_due", kwargs["total_amount"] - kwargs["amount_paid"])
+    kwargs.setdefault("currency", "AED")
+    kwargs.setdefault("created_by", user)
+    return Invoice.objects.create(**kwargs)
+
+
+def test_invoice_balance_must_equal_total_minus_paid(db, make_user):
+    """The arithmetic is held by a CHECK. Keeping amount_paid *true* to the allocations is
+    the allocation service's job — see the finance module docstring."""
+    user = make_user()
+    with pytest.raises(IntegrityError), transaction.atomic():
+        make_invoice(user, total_amount=1000, amount_paid=200, balance_due=900)
+
+    assert make_invoice(user, total_amount=1000, amount_paid=200, balance_due=800).pk
+
+
+def test_invoice_total_cannot_be_negative(db, make_user):
+    user = make_user()
+    with pytest.raises(IntegrityError), transaction.atomic():
+        make_invoice(user, subtotal=-5, total_amount=-5, amount_paid=0, balance_due=-5)
+
+
+def test_a_payment_must_be_positive(db, make_user, account):
+    from apps.finance.models import Payment
+
+    def payment(amount):
+        return Payment.objects.create(
+            payment_reference=f"PAY-{amount}", payer=make_contact(), account=account,
+            amount=amount, currency="AED",
+            payment_method=Payment.PaymentMethod.BANK_TRANSFER,
+            payment_date="2026-01-15", recorded_by=make_user(),
+        )
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        payment(0)
+    with pytest.raises(IntegrityError), transaction.atomic():
+        payment(-100)
+    assert payment(100).pk
+
+
+def test_one_payment_hits_an_invoice_at_most_once(db, make_user, account):
+    """Keeps SUM(allocations) unambiguous — a top-up adjusts the existing row."""
+    from apps.finance.models import Payment, PaymentAllocation
+
+    user = make_user()
+    invoice = make_invoice(user)
+    payment = Payment.objects.create(
+        payment_reference="PAY-DUP", payer=make_contact(), account=account,
+        amount=1000, currency="AED", payment_method=Payment.PaymentMethod.CASH,
+        payment_date="2026-01-15", recorded_by=user,
+    )
+    PaymentAllocation.objects.create(payment=payment, invoice=invoice, allocated_amount=400)
+    with pytest.raises(IntegrityError), transaction.atomic():
+        PaymentAllocation.objects.create(payment=payment, invoice=invoice, allocated_amount=600)
+
+
+def test_an_allocation_must_be_positive(db, make_user, account):
+    from apps.finance.models import Payment, PaymentAllocation
+
+    user = make_user()
+    payment = Payment.objects.create(
+        payment_reference="PAY-NEG", payer=make_contact(), account=account,
+        amount=1000, currency="AED", payment_method=Payment.PaymentMethod.CASH,
+        payment_date="2026-01-15", recorded_by=user,
+    )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        PaymentAllocation.objects.create(
+            payment=payment, invoice=make_invoice(user), allocated_amount=0
+        )
+
+
+def test_a_commission_hangs_off_a_transaction_or_a_lease_but_not_both(
+    db, make_user, make_lease, make_deal, make_property
+):
+    """§11 is explicit: a rental-only commission must never be forced to invent a fake
+    transaction to hang from."""
+    from apps.crm.models import Transaction
+    from apps.finance.models import Commission, CommissionPlan
+
+    agent = make_user("agent")
+    plan = CommissionPlan.objects.create(
+        name="Standard 2%", plan_type=CommissionPlan.PlanType.FLAT_PERCENT,
+        applies_to=CommissionPlan.AppliesTo.BOTH, base=CommissionPlan.Base.GROSS_AMOUNT,
+        rate=2,
+    )
+    txn = Transaction.objects.create(
+        property=make_property(), transaction_type=Transaction.TransactionType.SALE,
+        reference_code="TXN-0001", gross_amount=1000000, currency="AED",
+        transaction_date="2026-01-01",
+    )
+    lease = make_lease()
+    common = dict(
+        agent=agent, commission_plan=plan, gross_commission=20000, net_commission=18000
+    )
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Commission.objects.create(transaction=txn, lease=lease, **common)
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Commission.objects.create(**common)
+
+    assert Commission.objects.create(transaction=txn, **common).pk
+    assert Commission.objects.create(lease=lease, **common).pk
+
+
+def test_a_commission_split_names_exactly_one_recipient(db, make_user, make_property):
+    from apps.crm.models import Transaction
+    from apps.finance.models import Commission, CommissionPlan, CommissionSplit
+
+    plan = CommissionPlan.objects.create(
+        name="Flat", plan_type=CommissionPlan.PlanType.FLAT_PERCENT,
+        applies_to=CommissionPlan.AppliesTo.SALE, base=CommissionPlan.Base.GROSS_AMOUNT, rate=2,
+    )
+    commission = Commission.objects.create(
+        transaction=Transaction.objects.create(
+            property=make_property(), transaction_type=Transaction.TransactionType.SALE,
+            reference_code="TXN-SPLIT", gross_amount=1000000, currency="AED",
+            transaction_date="2026-01-01",
+        ),
+        agent=make_user("agent"), commission_plan=plan,
+        gross_commission=20000, net_commission=18000,
+    )
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        CommissionSplit.objects.create(
+            commission=commission, recipient_type=CommissionSplit.RecipientType.AGENT,
+            recipient_user=make_user(), recipient_contact=make_contact(),
+            percentage=50, amount=9000,
+        )
+    with pytest.raises(IntegrityError), transaction.atomic():
+        CommissionSplit.objects.create(
+            commission=commission, recipient_type=CommissionSplit.RecipientType.AGENT,
+            percentage=50, amount=9000,
+        )
+    assert CommissionSplit.objects.create(
+        commission=commission, recipient_type=CommissionSplit.RecipientType.REFERRAL_EXTERNAL,
+        recipient_contact=make_contact(), percentage=50, amount=9000,
+    ).pk
+
+
+def test_an_invoiced_milestone_must_carry_its_invoice(db, make_user, make_property):
+    from apps.crm.models import Transaction
+    from apps.finance.models import InstallmentMilestone, InstallmentPlan
+
+    user = make_user()
+    plan = InstallmentPlan.objects.create(
+        transaction=Transaction.objects.create(
+            property=make_property(), transaction_type=Transaction.TransactionType.SALE,
+            reference_code="TXN-PLAN", gross_amount=1000000, currency="AED",
+            transaction_date="2026-01-01",
+        ),
+        name="Off-plan 60/40", currency="AED", total_amount=1000000,
+    )
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        InstallmentMilestone.objects.create(
+            plan=plan, label="On booking", due_date="2026-02-01", amount=600000,
+            status=InstallmentMilestone.Status.INVOICED,
+        )
+
+    assert InstallmentMilestone.objects.create(
+        plan=plan, label="On booking", due_date="2026-02-01", amount=600000,
+        status=InstallmentMilestone.Status.INVOICED, invoice=make_invoice(user),
+    ).pk
+
+
+def test_a_reconciliation_cannot_claim_to_balance_while_showing_a_difference(db, account):
+    """§11: RECONCILED requires difference = 0. This is precisely the state an audit looks
+    for, so it is worth making unrepresentable."""
+    from apps.finance.models import Reconciliation
+
+    def recon(status, statement, system):
+        return Reconciliation.objects.create(
+            account=account, period_start="2026-01-01", period_end="2026-01-31",
+            opening_balance=0, closing_balance_statement=statement,
+            closing_balance_system=system, difference=statement - system, status=status,
+        )
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        recon(Reconciliation.Status.RECONCILED, 1000, 900)
+
+    assert recon(Reconciliation.Status.DISCREPANCY, 1000, 900).pk
+    assert recon(Reconciliation.Status.RECONCILED, 1000, 1000).pk
+
+
+def test_reconciliation_difference_is_derived_not_free_form(db, account):
+    from apps.finance.models import Reconciliation
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Reconciliation.objects.create(
+            account=account, period_start="2026-01-01", period_end="2026-01-31",
+            opening_balance=0, closing_balance_statement=1000,
+            closing_balance_system=900, difference=0,  # lies: should be 100
+            status=Reconciliation.Status.OPEN,
+        )

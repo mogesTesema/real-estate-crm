@@ -91,6 +91,24 @@ EXPECTED_TABLES = {
         "property_ops_maintenance_request",
         "property_ops_work_order",
     },
+    "finance": {
+        "finance_account",
+        "finance_account_entry",
+        "finance_commission_plan",
+        "finance_invoice",
+        "finance_invoice_line",
+        "finance_payment",
+        "finance_payment_allocation",
+        "finance_cheque",
+        "finance_commission",
+        "finance_commission_split",
+        "finance_installment_plan",
+        "finance_installment_milestone",
+        "finance_expense",
+        "finance_owner_statement",
+        "finance_owner_statement_line",
+        "finance_reconciliation",
+    },
 }
 
 

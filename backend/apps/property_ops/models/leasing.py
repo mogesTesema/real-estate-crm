@@ -154,8 +154,15 @@ class RentSchedule(models.Model):
     amount = models.DecimalField(max_digits=15, decimal_places=2)
     late_fee_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.SCHEDULED)
-    # `invoice` (FK finance.Invoice, nullable) is added by property_ops/0003 during the
-    # finance phase — finance is built after property_ops.
+    # Added by property_ops/0003 rather than 0001: finance is built after property_ops, so
+    # the target did not exist when this table was created.
+    invoice = models.ForeignKey(
+        "finance.Invoice",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="rent_schedules",
+    )
 
     class Meta:
         db_table = "property_ops_rent_schedule"
