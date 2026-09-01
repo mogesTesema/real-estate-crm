@@ -36,6 +36,7 @@ DJANGO_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "django.contrib.gis",
 ]
 
 THIRD_PARTY_APPS = [
@@ -46,21 +47,24 @@ THIRD_PARTY_APPS = [
     "corsheaders",
 ]
 
+# Build/migration order matters: core -> identity -> contacts -> inventory ->
+# crm -> property_ops -> finance -> collaboration -> platform (see
+# architecture.md's import DAG / implementation roadmap).
 LOCAL_APPS = [
     "apps.core",
+    "apps.identity",
     "apps.contacts",
-    "apps.properties",
-    "apps.leads",
-    "apps.deals",
-    "apps.activities",
-    "apps.integrations",
+    "apps.inventory",
+    "apps.crm",
+    "apps.property_ops",
+    "apps.finance",
+    "apps.collaboration",
+    "apps.platform",
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
 # --- Middleware -------------------------------------------------------------
-# TenantMiddleware runs AFTER authentication so it can read the tenant from the
-# authenticated user / JWT and bind it to the DB connection for RLS.
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
@@ -71,7 +75,6 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "apps.core.middleware.TenantMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -97,10 +100,12 @@ ASGI_APPLICATION = "config.asgi.application"
 
 # --- Database ---------------------------------------------------------------
 # DATABASE_URL (Neon/Render) wins when present; otherwise fall back to POSTGRES_* parts.
-# RLS uses a session-scoped GUC (apps/core/tenancy.py), which needs a real per-connection
-# session. Neon's `-pooler` endpoint is a transaction pooler that breaks session GUCs, so
-# we rewrite it to the direct host. Direct connections are the right choice for a
-# persistent gunicorn server anyway.
+# Some migrations bind a session-scoped GUC / rely on a real per-connection session
+# (apps/core/db_policy.py). Neon's `-pooler` endpoint is a transaction pooler that breaks
+# session-scoped state, so we rewrite it to the direct host. Direct connections are the
+# right choice for a persistent gunicorn server anyway.
+# ENGINE is the GeoDjango/PostGIS backend (architecture.md's geo_point columns require it).
+_GIS_ENGINE = "django.contrib.gis.db.backends.postgis"
 _DATABASE_URL = env("DATABASE_URL")
 if _DATABASE_URL:
     import dj_database_url
@@ -111,10 +116,11 @@ if _DATABASE_URL:
             _DATABASE_URL, conn_max_age=600, ssl_require=True
         )
     }
+    DATABASES["default"]["ENGINE"] = _GIS_ENGINE
 else:
     DATABASES = {
         "default": {
-            "ENGINE": "django.db.backends.postgresql",
+            "ENGINE": _GIS_ENGINE,
             "NAME": env("POSTGRES_DB", "crm"),
             "USER": env("POSTGRES_USER", "crm"),
             "PASSWORD": env("POSTGRES_PASSWORD", "crm"),
@@ -124,7 +130,7 @@ else:
     }
 
 # --- Auth -------------------------------------------------------------------
-AUTH_USER_MODEL = "core.User"
+AUTH_USER_MODEL = "identity.User"
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -159,26 +165,20 @@ SIMPLE_JWT = {
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "Real Estate CRM API",
-    "DESCRIPTION": "Multi-tenant real estate CRM — Phase 1 MVP.",
+    "DESCRIPTION": "Single-company real estate CRM — foundation/data-model pass.",
     "VERSION": "0.1.0",
     "SERVE_INCLUDE_SCHEMA": False,
     "COMPONENT_SPLIT_REQUEST": True,
 }
 
 # --- Celery -----------------------------------------------------------------
-# Optional. On the single-service (Render free) staging deploy there is no broker/worker,
-# so the SLA sweep is run via `python manage.py sweep_sla` (external cron) instead of Beat.
-# When REDIS_URL is absent, tasks run eagerly (inline) so any .delay() still works.
+# Optional. When REDIS_URL is absent, tasks run eagerly (inline) so any .delay() still
+# works. No CELERY_BEAT_SCHEDULE yet — no tasks.py exists in this foundation pass; a
+# future services pass (crm SLA sweep, finance rent recurrence, etc.) adds entries here.
 _REDIS_URL = env("REDIS_URL")
 CELERY_BROKER_URL = _REDIS_URL or "memory://"
 CELERY_RESULT_BACKEND = _REDIS_URL or "cache+memory://"
 CELERY_TASK_ALWAYS_EAGER = env_bool("CELERY_TASK_ALWAYS_EAGER", not _REDIS_URL)
-CELERY_BEAT_SCHEDULE = {
-    "lead-sla-sweep": {
-        "task": "apps.leads.tasks.sweep_sla_breaches",
-        "schedule": 300.0,  # every 5 minutes (SRS §3.1.9) — only when Beat is deployed
-    },
-}
 
 # --- Cache ------------------------------------------------------------------
 # Redis when available; otherwise in-process locmem (fine for a single web service).
@@ -255,12 +255,6 @@ if _frontend_origin:
 CORS_ALLOW_CREDENTIALS = True
 FRONTEND_ORIGIN = _frontend_origin or "http://localhost:5173"
 
-# --- Integration adapters (plan §2.5) ---------------------------------------
-# Swap these paths for real providers (Twilio, SendGrid) without touching core.
-SMS_PROVIDER = env("SMS_PROVIDER", "apps.integrations.providers.ConsoleSMSProvider")
-EMAIL_PROVIDER = env(
-    "EMAIL_PROVIDER", "apps.integrations.providers.ConsoleEmailProvider"
-)
-
-# --- Lead SLA (plan §6.3 / SRS 3.1.9) ---------------------------------------
-LEAD_SLA_MINUTES = int(env("LEAD_SLA_MINUTES", "60"))
+# Integration adapters (pluggable SMS/email/e-sign/payment providers) and lead-SLA config
+# belong to the platform/crm services passes — not built in this models-only foundation
+# pass. Re-add here once apps/platform/providers.py (or similar) exists.

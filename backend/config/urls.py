@@ -1,41 +1,19 @@
-"""Root URL configuration."""
-# pyrefly: ignore [missing-import]
-from django.contrib import admin
-from django.urls import include, path
-from drf_spectacular.views import (
-    SpectacularAPIView,
-    SpectacularRedocView,
-    SpectacularSwaggerView,
-)
-from rest_framework_simplejwt.views import (
-    TokenObtainPairView,
-    TokenRefreshView,
-)
+"""Root URL configuration.
 
-api_v1 = [
-    path("auth/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
-    path("auth/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
-    path("", include("apps.core.urls")),
-    path("", include("apps.contacts.urls")),
-    path("", include("apps.properties.urls")),
-    path("", include("apps.leads.urls")),
-    path("", include("apps.deals.urls")),
-    path("", include("apps.activities.urls")),
-]
+Foundation pass: no API layer yet (see apps/*/models.py). Only admin + a
+trivial healthcheck are wired here; JWT/schema endpoints return once the
+identity app's services/api layer exists in a later pass.
+"""
+from django.contrib import admin
+from django.http import JsonResponse
+from django.urls import path
+
+
+def healthz(request):
+    return JsonResponse({"status": "ok"})
+
 
 urlpatterns = [
     path("admin/", admin.site.urls),
-    path("api/v1/", include((api_v1, "api"), namespace="v1")),
-    # OpenAPI schema + Swagger UI (drives frontend type generation).
-    path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
-    path(
-        "api/docs/",
-        SpectacularSwaggerView.as_view(url_name="schema"),
-        name="swagger-ui",
-    ),
-    path(
-        "api/redoc/",
-        SpectacularRedocView.as_view(url_name="schema"),
-        name="redoc",
-    ),
+    path("healthz/", healthz, name="healthz"),
 ]
