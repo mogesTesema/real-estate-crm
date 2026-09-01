@@ -58,8 +58,15 @@ class Contact(SoftDeleteModel):
         on_delete=models.SET_NULL,
         related_name="assigned_contacts",
     )
-    # `default_source` (FK crm.LeadSource, nullable) is added by contacts/0002 during the crm
-    # phase — crm is built after contacts, so the target does not exist yet.
+    # Added by contacts/0002 rather than 0001: crm is built after contacts, so the target did
+    # not exist when this table was created.
+    default_source = models.ForeignKey(
+        "crm.LeadSource",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="default_for_contacts",
+    )
     notes = models.TextField(null=True, blank=True)
     custom_data = models.JSONField(default=dict, blank=True)
     is_active = models.BooleanField(default=True)

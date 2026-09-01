@@ -105,3 +105,57 @@ def make_property(property_type, make_user):
         return Property.objects.create(**kwargs)
 
     return _make
+
+
+@pytest.fixture
+def pipeline(db):
+    from apps.crm.models import Pipeline, PipelineStage
+
+    pipe = Pipeline.objects.create(
+        name="Residential Sales",
+        pipeline_type=Pipeline.PipelineType.RESIDENTIAL_SALES,
+        is_default=True,
+    )
+    for order, (name, code, prob, won, lost) in enumerate(
+        [
+            ("New", "NEW", 10, False, False),
+            ("Viewing", "VIEWING", 45, False, False),
+            ("Won", "WON", 100, True, False),
+            ("Lost", "LOST", 0, False, True),
+        ]
+    ):
+        PipelineStage.objects.create(
+            pipeline=pipe, name=name, code=code, sort_order=order,
+            probability=prob, is_won=won, is_lost=lost,
+        )
+    return pipe
+
+
+@pytest.fixture
+def make_deal(pipeline, make_user):
+    from apps.contacts.models import Contact
+    from apps.crm.models import Deal
+
+    owner = make_user("agent")
+    counter = iter(range(1, 1000))
+
+    def _make(**kwargs):
+        n = next(counter)
+        kwargs.setdefault("reference_code", f"DL-{n:04d}")
+        kwargs.setdefault(
+            "primary_contact",
+            Contact.objects.create(
+                contact_type=Contact.ContactType.PERSON, first_name="Deal", last_name=f"C{n}"
+            ),
+        )
+        kwargs.setdefault("pipeline", pipeline)
+        kwargs.setdefault("stage", pipeline.stages.first())
+        kwargs.setdefault("owner", owner)
+        kwargs.setdefault("title", f"Deal {n}")
+        kwargs.setdefault("deal_type", "SALE")
+        kwargs.setdefault("estimated_value", 1000000)
+        kwargs.setdefault("currency", "AED")
+        kwargs.setdefault("probability", 10)
+        return Deal.objects.create(**kwargs)
+
+    return _make

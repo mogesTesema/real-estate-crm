@@ -220,3 +220,110 @@ def test_listing_reference_is_unique_among_live_listings(make_property):
     first.deleted_at = timezone.now()
     first.save(update_fields=["deleted_at"])
     assert listing().pk
+
+
+# --- crm (§6, §7, §9) -------------------------------------------------------
+
+
+def test_a_routing_rule_targets_exactly_one_of_user_or_team(db, make_user, team):
+    """§7: exactly one of assign_to_user / assign_to_team. Neither can never assign;
+    both has no defined meaning."""
+    from apps.crm.models import LeadRoutingRule
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        LeadRoutingRule.objects.create(
+            name="both", priority=1, assign_to_user=make_user(), assign_to_team=team
+        )
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        LeadRoutingRule.objects.create(name="neither", priority=2)
+
+    assert LeadRoutingRule.objects.create(
+        name="team only", priority=3, assign_to_team=team, round_robin=True
+    ).pk
+
+
+def test_a_lost_deal_must_carry_a_reason(db, make_deal):
+    """Mandatory loss reason (SRS 3.4.5). The spec permits service-layer enforcement; a
+    CHECK is stronger because imports and data migrations cannot route around it."""
+    from apps.crm.models import Deal
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        make_deal(status=Deal.Status.LOST)
+
+    assert make_deal(status=Deal.Status.LOST, lost_reason="Bought elsewhere").pk
+    assert make_deal(status=Deal.Status.OPEN).pk  # OPEN needs no reason
+
+
+def test_deal_reference_is_unique_among_live_deals(db, make_deal):
+    from django.utils import timezone
+
+    first = make_deal(reference_code="DL-0001")
+    with pytest.raises(IntegrityError), transaction.atomic():
+        make_deal(reference_code="DL-0001")
+
+    first.deleted_at = timezone.now()
+    first.save(update_fields=["deleted_at"])
+    assert make_deal(reference_code="DL-0001").pk
+
+
+def test_a_viewing_must_end_after_it_starts(db, make_deal, make_property, make_user):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from apps.crm.models import Viewing
+
+    start = timezone.now()
+    common = dict(
+        property=make_property(),
+        agent=make_user("agent"),
+        contact=make_contact(),
+        deal=make_deal(),
+    )
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Viewing.objects.create(
+            scheduled_start=start, scheduled_end=start - timedelta(hours=1), **common
+        )
+
+    assert Viewing.objects.create(
+        scheduled_start=start, scheduled_end=start + timedelta(hours=1), **common
+    ).pk
+
+
+def test_a_stage_cannot_be_both_won_and_lost(db, pipeline):
+    from apps.crm.models import PipelineStage
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        PipelineStage.objects.create(
+            pipeline=pipeline, name="Impossible", code="IMP", sort_order=99,
+            probability=50, is_won=True, is_lost=True,
+        )
+
+
+def test_a_closing_checklist_needs_a_deal_or_a_transaction(db, make_deal):
+    from apps.crm.models import ClosingChecklist
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        ClosingChecklist.objects.create(
+            checklist_type=ClosingChecklist.ChecklistType.SALE, name="Orphan"
+        )
+
+    assert ClosingChecklist.objects.create(
+        deal=make_deal(), checklist_type=ClosingChecklist.ChecklistType.SALE, name="Attached"
+    ).pk
+
+
+def test_campaign_metrics_are_one_row_per_campaign_per_day(db, make_user):
+    """Not in the spec's constraint list, but a daily rollup that can be inserted twice
+    silently double-counts spend and conversions on a job re-run."""
+    from apps.crm.models import Campaign, CampaignMetric
+
+    campaign = Campaign.objects.create(
+        name="Spring", campaign_type="PPC", start_date="2026-03-01",
+        status="ACTIVE", owner=make_user(),
+    )
+    CampaignMetric.objects.create(campaign=campaign, metric_date="2026-03-02", cost=100)
+    with pytest.raises(IntegrityError):
+        CampaignMetric.objects.create(campaign=campaign, metric_date="2026-03-02", cost=100)
