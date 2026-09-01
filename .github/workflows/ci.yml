@@ -24,6 +24,9 @@ jobs:
         ports: ["6379:6379"]
     env:
       POSTGRES_HOST: localhost
+      # Django connects as crm_app, not the container's bootstrap `postgres` superuser.
+      POSTGRES_USER: crm_app
+      POSTGRES_PASSWORD: crm
       REDIS_URL: redis://localhost:6379/0
       DJANGO_SETTINGS_MODULE: config.settings.test
     defaults:
@@ -38,12 +41,21 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gdal-bin libgdal-dev libgeos-dev libproj-dev
       - run: pip install -r requirements-dev.txt
       - run: ruff check .
-      - name: Create non-superuser DB role for RLS
+      - name: Enforce the architecture.md import DAG
+        run: lint-imports
+      - name: Create the non-superuser app role and install PostGIS
+        # crm_app must be a non-superuser: a superuser ignores the REVOKE UPDATE/DELETE that
+        # apps/core/db_policy.py applies to the append-only tables, so the immutability tests
+        # would pass vacuously. PostGIS goes into template1 as well so the test database
+        # pytest creates inherits it (pg_trgm/btree_gist are trusted and come from a Django
+        # migration instead).
         run: |
           PGPASSWORD=postgres psql -U postgres -h localhost -d crm -c "
-            CREATE ROLE crm WITH LOGIN PASSWORD 'crm' NOSUPERUSER CREATEDB;
-            ALTER DATABASE crm OWNER TO crm;
-            GRANT ALL ON SCHEMA public TO crm;
+            CREATE ROLE crm_app WITH LOGIN PASSWORD 'crm' NOSUPERUSER CREATEDB;
+            ALTER DATABASE crm OWNER TO crm_app;
+            GRANT ALL ON SCHEMA public TO crm_app;
           "
+          PGPASSWORD=postgres psql -U postgres -h localhost -d template1 -c "CREATE EXTENSION IF NOT EXISTS postgis;"
+          PGPASSWORD=postgres psql -U postgres -h localhost -d crm -c "CREATE EXTENSION IF NOT EXISTS postgis;"
       - run: python manage.py migrate --noinput
       - run: pytest

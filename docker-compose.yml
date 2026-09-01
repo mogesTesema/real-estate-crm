@@ -3,6 +3,8 @@ services:
     image: postgis/postgis:16-3.4
     environment:
       POSTGRES_DB: crm
+      # Bootstrap superuser, used only to run deploy/postgres-init.sql. Django connects as
+      # the non-superuser `crm_app` that script creates — see the note in postgres-init.sql.
       POSTGRES_USER: crm
       POSTGRES_PASSWORD: crm
     ports:

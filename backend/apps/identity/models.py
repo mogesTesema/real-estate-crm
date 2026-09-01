@@ -6,7 +6,6 @@ from django.contrib.auth.models import PermissionsMixin
 from django.db import models
 
 from apps.core.choices import ScopedEntityType
-from apps.core.models import BaseModel
 
 
 class Company(models.Model):
@@ -19,8 +18,10 @@ class Company(models.Model):
     legal_name = models.CharField(max_length=200)
     registration_number = models.CharField(max_length=100, null=True, blank=True)
     tax_number = models.CharField(max_length=100, null=True, blank=True)
-    # logo_file_id -> collaboration.File: deferred FK pass (collaboration built later).
-    logo_file_id = models.UUIDField(null=True, blank=True)
+    # `logo_file` (FK collaboration_file, nullable) is added by a later migration, once the
+    # collaboration app exists — architecture.md §4's migration-ordering note. identity and
+    # collaboration reference each other (collaboration_file.uploaded_by -> identity_user), so
+    # this is the one genuinely circular pair in the schema and the FK has to arrive second.
     email = models.EmailField()
     phone = models.CharField(max_length=30)
     website = models.URLField(null=True, blank=True)
@@ -112,15 +113,27 @@ class UserManager(BaseUserManager):
 
 class User(AbstractBaseUser, PermissionsMixin):
     """architecture.md §4: no created_by/updated_by in the spec's field list
-    for identity_user, so this does not subclass BaseModel."""
+    for identity_user, so this does not subclass BaseModel.
+
+    **Email uniqueness is partial, and that is deliberate.** §4 specifies
+    ``email VARCHAR (Partial Unique Index WHERE deleted_at IS NULL)`` — soft-deleting a user
+    must free their address for reuse, which a plain ``unique=True`` would prevent. Django's
+    ``auth.E003`` check insists USERNAME_FIELD be plainly unique, so it is silenced in
+    settings (see SILENCED_SYSTEM_CHECKS) and the constraint is enforced by
+    ``identity_user_email_uniq`` below instead.
+
+    The consequence: two rows CAN share an email when one is soft-deleted, so anything that
+    resolves a user by email — the auth backend, password reset, portal login — MUST filter
+    ``deleted_at__isnull=True``. There is no such code yet; this lands with the services pass.
+    """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email = models.EmailField()
     phone = models.CharField(max_length=30, null=True, blank=True)
     first_name = models.CharField(max_length=150)
     last_name = models.CharField(max_length=150)
-    # avatar_file_id -> collaboration.File: deferred FK pass.
-    avatar_file_id = models.UUIDField(null=True, blank=True)
+    # `avatar_file` (FK collaboration_file, nullable) is added by a later migration — see the
+    # note on Company.logo_file above.
     employee_number = models.CharField(max_length=50, null=True, blank=True)
     job_title = models.CharField(max_length=150, null=True, blank=True)
     branch = models.ForeignKey(
@@ -244,9 +257,11 @@ class PortalProfile(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="portal_profile")
-    # contact_id -> contacts.Contact: forward reference (identity built before
-    # contacts). Deferred FK pass promotes this to a real ForeignKey.
-    contact_id = models.UUIDField(unique=True)
+    # Added by identity/0003 rather than 0001: contacts is built after identity, so the target
+    # did not exist when this table was created. Required, per §4's `contact_id ... UNIQUE`.
+    contact = models.OneToOneField(
+        "contacts.Contact", on_delete=models.PROTECT, related_name="portal_profile"
+    )
     portal_type = models.CharField(max_length=20, choices=PortalType.choices)
     eligibility_status = models.CharField(
         max_length=20,

@@ -3,23 +3,54 @@
 Quick daily notes on what got done on the backend and where things stand. Frontend-only work
 is tracked in the frontend repo's own log and omitted here.
 
-**Current state:** Live API modules — auth/users, contacts, properties/listings, leads,
-pipeline (deals), and activities — are wired and covered by tests. Finance, marketing,
-leases, and portal exist only as an in-browser demo-data layer on the frontend; they have no
-backend models or endpoints yet. Seed every role via `python manage.py seed_demo --reset` —
-password `demo12345` for all.
+**Current state:** the backend is being rebuilt against `architecture.md` v3.2, which
+restructures it into nine apps under a strict import DAG. **There is no API right now** —
+only `/healthz/` and Django admin. The current pass builds schema only (models, migrations,
+constraints for ~90 tables); services and the HTTP API follow in a second pass.
 
-**Demo logins**
-| Email | Role |
-| :--- | :--- |
-| `superadmin@demo.test` | Super Admin |
-| `owner@demo.test` / `admin@demo.test` | Broker / Owner |
-| `manager@demo.test` | Branch Manager |
-| `agent1@demo.test` | Sales Agent |
-| `pm@demo.test` | Property Manager |
-| `marketing@demo.test` | Marketing |
-| `finance@demo.test` | Finance |
-| `portal@demo.test` | Portal User |
+Steps 1–2 of the roadmap are done (`core`, `identity`). The other seven apps are scaffolded
+but empty. The previous working Phase-1 API is preserved at tag **`phase1-flat-layout`**.
+
+The demo logins below no longer exist: `seed_demo` was part of the old layout and was removed
+with it. A new seed command arrives with the API pass.
+
+---
+
+## Day 11: Tue, Sep 1, 2026; restructure to architecture.md v3.2
+
+Replaced the flat seven-app layout with the nine DAG-ordered apps the spec requires, and got
+the repo back to a state where `migrate` is meaningful.
+
+**Why the rewrite, not an extension**
+- Row visibility moved from Postgres RLS (session GUC + `tenant_id` partition on every table)
+  to application-layer scoping via `identity.selectors.apply_scope`. The GUC machinery in
+  `apps/core/tenancy.py` and the per-app `000N_rls.py` migrations had no place in the new
+  design and were deleted rather than ported.
+- "Tenant" was redefined to mean a *rental tenant* (lease party), so the SaaS partition column
+  is gone from every table. The non-superuser `crm_app` role stays, but its job is now to make
+  the four append-only tables genuinely immutable — a superuser ignores the `REVOKE`.
+
+**What got done**
+- Tagged the old implementation `phase1-flat-layout` and committed its removal as one
+  checkpoint, so the domain logic (lead scoring/routing, contact merge, listing state machine,
+  `move_stage`) stays retrievable for the services pass.
+- Scaffolded architecture.md §1.2's mandatory public surface — `apps.py`, `services.py`,
+  `selectors.py`, `tasks.py`, `api/` — across all nine apps, plus the normative `models/`
+  packages for the three fat apps (`crm`, `property_ops`, `collaboration`).
+- Wired **import-linter** contracts into CI. The §1.2 matrix is not a pure layering
+  (`collaboration`/`platform` are satellites everyone calls, and `crm` ↔ `property_ops` is
+  bidirectional by design), so the contracts encode the parts that are absolute: the
+  `core → identity → contacts → inventory` spine, the ban on importing another app's `api/`,
+  and the ban on satellites calling domain write services.
+- Split extension bootstrap by trust level: `pg_trgm` and `btree_gist` are trusted, so a Django
+  migration installs them and it works on Neon unattended; PostGIS is not, so it is
+  provisioned as infrastructure in `postgres-init.sql`, a CI psql step, and the Neon dashboard.
+- Unified the app database role on `crm_app` across compose, CI, settings, and `.env.example`.
+  This was a real hazard: `db_policy._app_db_role()` reads the role name from settings at
+  migrate time, so the three-way mismatch would have produced `REVOKE`s against a role nobody
+  connects as — immutability tests passing vacuously.
+- Rewrote `README.md`, `DEPLOY.md`, and this file, all three of which still described the old
+  system as live.
 
 ---
 

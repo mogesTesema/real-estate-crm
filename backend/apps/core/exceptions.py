@@ -1,4 +1,4 @@
-"""Uniform API error envelope (plan §5, Phase 0 step 8)."""
+"""Uniform API error envelope for the DRF layer."""
 from rest_framework.views import exception_handler
 
 

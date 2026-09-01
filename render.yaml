@@ -1,6 +1,13 @@
 # Render blueprint — single web service (free plan allows one service; no Redis/worker).
-# The SLA sweep runs via `python manage.py sweep_sla` from an external cron instead of Beat.
-# DATABASE_URL must be the crm_app (NON-bypassrls) Neon URL — see backend/.env / the deploy doc.
+#
+# The service is intentionally minimal during the architecture.md v3.2 rebuild: there is no
+# API layer yet, so the health check targets /healthz/ rather than the API schema, and there
+# is no seed command to run. Both come back with the API pass.
+#
+# DATABASE_URL must be the crm_app Neon URL, NOT neondb_owner. crm_app is deliberately a
+# non-superuser role: superusers ignore the REVOKE UPDATE/DELETE that makes the append-only
+# tables (finance_account_entry, platform_audit_event, collaboration_signature_event,
+# crm_agent_location_point) actually immutable. See DEPLOY.md.
 services:
   - type: web
     name: estatecrm-api
@@ -8,8 +15,8 @@ services:
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     plan: free
-    healthCheckPath: /api/schema/
-    preDeployCommand: "python manage.py migrate --noinput && python manage.py collectstatic --noinput && python manage.py seed_demo"
+    healthCheckPath: /healthz/
+    preDeployCommand: "python manage.py migrate --noinput && python manage.py collectstatic --noinput"
     envVars:
       - key: DJANGO_SETTINGS_MODULE
         value: config.settings.prod

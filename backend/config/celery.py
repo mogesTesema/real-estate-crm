@@ -1,4 +1,4 @@
-"""Celery application (background jobs, scheduled sweeps — plan §1, §6.3)."""
+"""Celery application (architecture.md §1.3 "Workers")."""
 import os
 
 from celery import Celery

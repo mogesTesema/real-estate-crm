@@ -9,3 +9,226 @@ ignore = ["B008"]  # DRF/Django default-argument callables are idiomatic
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E501"]  # test data/setup lines are naturally long
+
+# --- Import DAG enforcement -------------------------------------------------
+# architecture.md's Architecture Principles: "DAG enforcement MUST be enforced in CI
+# (e.g. import-linter / custom lint). Prose alone is not sufficient." Run with
+# `lint-imports` from backend/; CI runs it alongside ruff.
+#
+# What is NOT encoded here, and why: the §1.2 matrix is not a pure layering. `collaboration`
+# and `platform` are satellites that every domain calls (notify_*, record_event) while also
+# reading domain rows, and `crm` <-> `property_ops` is bidirectional by design
+# (crm.services.mark_deal_won calls property_ops.services.create_lease_from_deal, while
+# property_ops reads crm.selectors for lease lineage). Those edges are legal, so a single
+# layers contract spanning all nine apps would be wrong. What makes the cycles safe is that
+# cross-app model references are lazy FK strings ("crm.Deal"), not Python imports.
+# The contracts below encode the parts of the matrix that ARE absolute.
+[tool.importlinter]
+root_package = "apps"
+
+[[tool.importlinter.contracts]]
+name = "Foundation spine is strictly layered (core -> identity -> contacts -> inventory)"
+type = "layers"
+layers = ["apps.inventory", "apps.contacts", "apps.identity", "apps.core"]
+
+[[tool.importlinter.contracts]]
+name = "core is the kernel and depends on no other app"
+type = "forbidden"
+source_modules = ["apps.core"]
+forbidden_modules = [
+    "apps.identity",
+    "apps.contacts",
+    "apps.inventory",
+    "apps.crm",
+    "apps.property_ops",
+    "apps.finance",
+    "apps.collaboration",
+    "apps.platform",
+]
+
+[[tool.importlinter.contracts]]
+name = "identity does not depend on the domains layered above it"
+type = "forbidden"
+source_modules = ["apps.identity"]
+forbidden_modules = [
+    "apps.contacts",
+    "apps.inventory",
+    "apps.crm",
+    "apps.property_ops",
+    "apps.finance",
+    "apps.platform",
+]
+
+[[tool.importlinter.contracts]]
+name = "contacts does not depend on the domains layered above it"
+type = "forbidden"
+source_modules = ["apps.contacts"]
+forbidden_modules = [
+    "apps.inventory",
+    "apps.crm",
+    "apps.property_ops",
+    "apps.finance",
+    "apps.platform",
+]
+
+[[tool.importlinter.contracts]]
+name = "inventory does not depend on the domains layered above it"
+type = "forbidden"
+source_modules = ["apps.inventory"]
+forbidden_modules = [
+    "apps.crm",
+    "apps.property_ops",
+    "apps.finance",
+    "apps.platform",
+]
+
+# architecture.md §1.2 forbidden patterns: "Importing another app's api / views /
+# serializers". One contract per app, because import-linter rejects a contract whose
+# forbidden module (apps.X.api) is a descendant of one of its source modules (apps.X) —
+# and an app wiring up its own api/ is legitimate.
+[[tool.importlinter.contracts]]
+name = "Nothing outside core imports apps.core.api"
+type = "forbidden"
+source_modules = [
+    "apps.identity",
+    "apps.contacts",
+    "apps.inventory",
+    "apps.crm",
+    "apps.property_ops",
+    "apps.finance",
+    "apps.collaboration",
+    "apps.platform",
+]
+forbidden_modules = ["apps.core.api"]
+
+[[tool.importlinter.contracts]]
+name = "Nothing outside identity imports apps.identity.api"
+type = "forbidden"
+source_modules = [
+    "apps.core",
+    "apps.contacts",
+    "apps.inventory",
+    "apps.crm",
+    "apps.property_ops",
+    "apps.finance",
+    "apps.collaboration",
+    "apps.platform",
+]
+forbidden_modules = ["apps.identity.api"]
+
+[[tool.importlinter.contracts]]
+name = "Nothing outside contacts imports apps.contacts.api"
+type = "forbidden"
+source_modules = [
+    "apps.core",
+    "apps.identity",
+    "apps.inventory",
+    "apps.crm",
+    "apps.property_ops",
+    "apps.finance",
+    "apps.collaboration",
+    "apps.platform",
+]
+forbidden_modules = ["apps.contacts.api"]
+
+[[tool.importlinter.contracts]]
+name = "Nothing outside inventory imports apps.inventory.api"
+type = "forbidden"
+source_modules = [
+    "apps.core",
+    "apps.identity",
+    "apps.contacts",
+    "apps.crm",
+    "apps.property_ops",
+    "apps.finance",
+    "apps.collaboration",
+    "apps.platform",
+]
+forbidden_modules = ["apps.inventory.api"]
+
+[[tool.importlinter.contracts]]
+name = "Nothing outside crm imports apps.crm.api"
+type = "forbidden"
+source_modules = [
+    "apps.core",
+    "apps.identity",
+    "apps.contacts",
+    "apps.inventory",
+    "apps.property_ops",
+    "apps.finance",
+    "apps.collaboration",
+    "apps.platform",
+]
+forbidden_modules = ["apps.crm.api"]
+
+[[tool.importlinter.contracts]]
+name = "Nothing outside property_ops imports apps.property_ops.api"
+type = "forbidden"
+source_modules = [
+    "apps.core",
+    "apps.identity",
+    "apps.contacts",
+    "apps.inventory",
+    "apps.crm",
+    "apps.finance",
+    "apps.collaboration",
+    "apps.platform",
+]
+forbidden_modules = ["apps.property_ops.api"]
+
+[[tool.importlinter.contracts]]
+name = "Nothing outside finance imports apps.finance.api"
+type = "forbidden"
+source_modules = [
+    "apps.core",
+    "apps.identity",
+    "apps.contacts",
+    "apps.inventory",
+    "apps.crm",
+    "apps.property_ops",
+    "apps.collaboration",
+    "apps.platform",
+]
+forbidden_modules = ["apps.finance.api"]
+
+[[tool.importlinter.contracts]]
+name = "Nothing outside collaboration imports apps.collaboration.api"
+type = "forbidden"
+source_modules = [
+    "apps.core",
+    "apps.identity",
+    "apps.contacts",
+    "apps.inventory",
+    "apps.crm",
+    "apps.property_ops",
+    "apps.finance",
+    "apps.platform",
+]
+forbidden_modules = ["apps.collaboration.api"]
+
+[[tool.importlinter.contracts]]
+name = "Nothing outside platform imports apps.platform.api"
+type = "forbidden"
+source_modules = [
+    "apps.core",
+    "apps.identity",
+    "apps.contacts",
+    "apps.inventory",
+    "apps.crm",
+    "apps.property_ops",
+    "apps.finance",
+    "apps.collaboration",
+]
+forbidden_modules = ["apps.platform.api"]
+
+[[tool.importlinter.contracts]]
+name = "Satellites (collaboration, platform) never call domain write services"
+type = "forbidden"
+source_modules = ["apps.collaboration", "apps.platform"]
+forbidden_modules = [
+    "apps.contacts.services",
+    "apps.inventory.services",
+    "apps.crm.services",
+    "apps.property_ops.services",
+    "apps.finance.services",
+]

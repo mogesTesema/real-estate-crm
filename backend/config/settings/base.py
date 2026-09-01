@@ -2,7 +2,7 @@
 Base Django settings for the Real Estate CRM.
 
 Shared across dev/prod. Environment-specific overrides live in dev.py / prod.py.
-See implimentation-plan.md §1 for the stack rationale.
+See architecture.md "Architecture Principles" and §1.3 for the stack rationale.
 """
 import os
 from datetime import timedelta
@@ -100,10 +100,10 @@ ASGI_APPLICATION = "config.asgi.application"
 
 # --- Database ---------------------------------------------------------------
 # DATABASE_URL (Neon/Render) wins when present; otherwise fall back to POSTGRES_* parts.
-# Some migrations bind a session-scoped GUC / rely on a real per-connection session
-# (apps/core/db_policy.py). Neon's `-pooler` endpoint is a transaction pooler that breaks
-# session-scoped state, so we rewrite it to the direct host. Direct connections are the
-# right choice for a persistent gunicorn server anyway.
+# Neon's `-pooler` endpoint is a transaction pooler, which breaks anything relying on a
+# stable per-connection session (advisory locks, SET LOCAL, SELECT ... FOR UPDATE spanning
+# statements — architecture.md §2's reference-code generator needs the last of these), so we
+# rewrite it to the direct host. Direct connections suit a persistent gunicorn server anyway.
 # ENGINE is the GeoDjango/PostGIS backend (architecture.md's geo_point columns require it).
 _GIS_ENGINE = "django.contrib.gis.db.backends.postgis"
 _DATABASE_URL = env("DATABASE_URL")
@@ -122,7 +122,10 @@ else:
         "default": {
             "ENGINE": _GIS_ENGINE,
             "NAME": env("POSTGRES_DB", "crm"),
-            "USER": env("POSTGRES_USER", "crm"),
+            # Must match the non-superuser role deploy/postgres-init.sql creates:
+            # apps/core/db_policy.py reads this value at migrate time to build the
+            # append-only REVOKE statements. A mismatch silently revokes from nobody.
+            "USER": env("POSTGRES_USER", "crm_app"),
             "PASSWORD": env("POSTGRES_PASSWORD", "crm"),
             "HOST": env("POSTGRES_HOST", "localhost"),
             "PORT": env("POSTGRES_PORT", "5432"),
@@ -131,6 +134,14 @@ else:
 
 # --- Auth -------------------------------------------------------------------
 AUTH_USER_MODEL = "identity.User"
+
+# auth.E003 requires USERNAME_FIELD to carry a plain unique=True. architecture.md §4 instead
+# specifies a PARTIAL unique index on identity_user.email (WHERE deleted_at IS NULL), so that
+# soft-deleting a user releases their address for reuse. The uniqueness is real, just
+# conditional, and it is enforced by the identity_user_email_uniq constraint on the model.
+# Callers that resolve a user by email must filter deleted_at__isnull=True — see the note on
+# apps.identity.models.User.
+SILENCED_SYSTEM_CHECKS = ["auth.E003"]
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -173,8 +184,10 @@ SPECTACULAR_SETTINGS = {
 
 # --- Celery -----------------------------------------------------------------
 # Optional. When REDIS_URL is absent, tasks run eagerly (inline) so any .delay() still
-# works. No CELERY_BEAT_SCHEDULE yet — no tasks.py exists in this foundation pass; a
-# future services pass (crm SLA sweep, finance rent recurrence, etc.) adds entries here.
+# works. No CELERY_BEAT_SCHEDULE yet — the per-app tasks.py modules are still empty stubs.
+# The services pass fills them in and adds the schedules architecture.md §1.3 lists: rent
+# recurrence (finance/property_ops), SLA sweeps (crm), report snapshots and webhook delivery
+# (platform), notification dispatch (collaboration), MLS/portal sync (platform).
 _REDIS_URL = env("REDIS_URL")
 CELERY_BROKER_URL = _REDIS_URL or "memory://"
 CELERY_RESULT_BACKEND = _REDIS_URL or "cache+memory://"
@@ -217,7 +230,7 @@ if AWS_STORAGE_BUCKET_NAME:
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"
 USE_I18N = True
-USE_TZ = True  # store UTC, render per-user tz (plan §2.6)
+USE_TZ = True  # TIMESTAMPTZ in UTC everywhere (architecture.md §2)
 
 # --- Static / media ---------------------------------------------------------
 STATIC_URL = "static/"
