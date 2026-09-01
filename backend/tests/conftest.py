@@ -74,3 +74,34 @@ def agent(make_user):
 @pytest.fixture
 def owner(make_user):
     return make_user("owner")
+
+
+@pytest.fixture
+def property_type(db):
+    from apps.inventory.models import PropertyType
+
+    return PropertyType.objects.create(
+        name="Apartment", code="APARTMENT", category=PropertyType.Category.RESIDENTIAL
+    )
+
+
+@pytest.fixture
+def make_property(property_type, make_user):
+    """A property needs a Property Manager — managed_by is required (SRS 3.3.10)."""
+    from apps.inventory.models import Property
+
+    manager = make_user("property_manager")
+    counter = iter(range(1, 1000))
+
+    def _make(**kwargs):
+        n = next(counter)
+        kwargs.setdefault("property_type", property_type)
+        kwargs.setdefault("managed_by", manager)
+        kwargs.setdefault("title", f"Property {n}")
+        kwargs.setdefault("address_line_1", f"{n} Marina Walk")
+        kwargs.setdefault("city", "Dubai")
+        kwargs.setdefault("country", "AE")
+        kwargs.setdefault("status", Property.Status.AVAILABLE)
+        return Property.objects.create(**kwargs)
+
+    return _make

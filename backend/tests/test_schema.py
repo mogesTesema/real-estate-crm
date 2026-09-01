@@ -45,6 +45,17 @@ EXPECTED_TABLES = {
         "contacts_contact_relationship",
         "contacts_consent",
     },
+    "inventory": {
+        "inventory_property_type",
+        "inventory_project",
+        "inventory_building",
+        "inventory_property",
+        "inventory_unit",
+        "inventory_property_status_history",
+        "inventory_property_owner",
+        "inventory_listing",
+        "inventory_media",
+    },
 }
 
 

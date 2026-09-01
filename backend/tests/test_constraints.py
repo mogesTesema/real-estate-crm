@@ -106,3 +106,117 @@ def test_a_contact_in_use_by_a_portal_profile_cannot_be_hard_deleted(db, make_us
     )
     with pytest.raises(IntegrityError), transaction.atomic():
         contact.delete()
+
+
+# --- inventory (§8) ---------------------------------------------------------
+
+
+def test_unit_numbers_are_unique_within_a_property(make_property):
+    from apps.inventory.models import Unit
+
+    prop = make_property(is_multi_unit=True)
+    Unit.objects.create(property=prop, unit_number="101", status=Unit.Status.AVAILABLE)
+    with pytest.raises(IntegrityError):
+        Unit.objects.create(property=prop, unit_number="101", status=Unit.Status.AVAILABLE)
+
+
+def test_retiring_a_unit_frees_its_number(make_property):
+    """Partial unique index: (property, unit_number) WHERE deleted_at IS NULL."""
+    from django.utils import timezone
+
+    from apps.inventory.models import Unit
+
+    prop = make_property(is_multi_unit=True)
+    old = Unit.objects.create(property=prop, unit_number="101", status=Unit.Status.AVAILABLE)
+    old.deleted_at = timezone.now()
+    old.save(update_fields=["deleted_at"])
+
+    reused = Unit.objects.create(property=prop, unit_number="101", status=Unit.Status.AVAILABLE)
+    assert reused.pk != old.pk
+
+
+def test_status_history_targets_exactly_one_of_property_or_unit(make_property, make_user):
+    """§8: "Exactly one of property_id/unit_id is set" — neither both nor neither."""
+    from apps.inventory.models import PropertyStatusHistory, Unit
+
+    prop = make_property()
+    unit = Unit.objects.create(property=prop, unit_number="1", status=Unit.Status.AVAILABLE)
+    user = make_user()
+
+    # Both set -> rejected.
+    with pytest.raises(IntegrityError), transaction.atomic():
+        PropertyStatusHistory.objects.create(
+            property=prop, unit=unit, to_status="AVAILABLE", changed_by=user
+        )
+
+    # Neither set -> rejected.
+    with pytest.raises(IntegrityError), transaction.atomic():
+        PropertyStatusHistory.objects.create(to_status="AVAILABLE", changed_by=user)
+
+    # Exactly one -> accepted.
+    assert PropertyStatusHistory.objects.create(
+        property=prop, to_status="AVAILABLE", changed_by=user
+    ).pk
+
+
+@pytest.mark.parametrize("pct", ["0", "-5", "100.01", "150"])
+def test_ownership_percentage_must_be_within_zero_to_one_hundred(make_property, pct):
+    from decimal import Decimal
+
+    from apps.inventory.models import PropertyOwner
+
+    prop = make_property()
+    with pytest.raises(IntegrityError), transaction.atomic():
+        PropertyOwner.objects.create(
+            property=prop,
+            contact=make_contact(),
+            ownership_percentage=Decimal(pct),
+            is_primary_owner=True,
+            start_date="2026-01-01",
+        )
+
+
+def test_media_needs_a_target_and_a_blob_reference(make_property):
+    from apps.inventory.models import Media
+
+    prop = make_property()
+
+    # No target at all -> rejected.
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Media.objects.create(
+            media_type=Media.MediaType.PHOTO, storage_key="media/x.jpg"
+        )
+
+    # Target but no blob reference -> rejected (widens to "file or storage_key" in 0002).
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Media.objects.create(property=prop, media_type=Media.MediaType.PHOTO)
+
+    assert Media.objects.create(
+        property=prop, media_type=Media.MediaType.PHOTO, storage_key="media/x.jpg"
+    ).pk
+
+
+def test_listing_reference_is_unique_among_live_listings(make_property):
+    from django.utils import timezone
+
+    from apps.inventory.models import Listing
+
+    prop = make_property()
+
+    def listing(**kw):
+        return Listing.objects.create(
+            property=prop,
+            reference_code="LST-0001",
+            listing_type=Listing.ListingType.SALE,
+            title="A listing",
+            status=Listing.Status.ACTIVE,
+            **kw,
+        )
+
+    first = listing()
+    with pytest.raises(IntegrityError), transaction.atomic():
+        listing()
+
+    first.deleted_at = timezone.now()
+    first.save(update_fields=["deleted_at"])
+    assert listing().pk
