@@ -79,6 +79,18 @@ EXPECTED_TABLES = {
         "crm_closing_checklist_item",
         "crm_transaction",
     },
+    "property_ops": {
+        "property_ops_lease",
+        "property_ops_lease_party",
+        "property_ops_rent_schedule",
+        "property_ops_deposit",
+        "property_ops_inspection",
+        "property_ops_application",
+        "property_ops_renewal",
+        "property_ops_vendor",
+        "property_ops_maintenance_request",
+        "property_ops_work_order",
+    },
 }
 
 

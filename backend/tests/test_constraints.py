@@ -327,3 +327,105 @@ def test_campaign_metrics_are_one_row_per_campaign_per_day(db, make_user):
     CampaignMetric.objects.create(campaign=campaign, metric_date="2026-03-02", cost=100)
     with pytest.raises(IntegrityError):
         CampaignMetric.objects.create(campaign=campaign, metric_date="2026-03-02", cost=100)
+
+
+# --- property_ops (§10, §14) ------------------------------------------------
+
+
+def test_two_active_leases_cannot_overlap_on_the_same_property(make_property, make_lease):
+    """The exclusion constraint — double-letting must be impossible, not merely unlikely."""
+    prop = make_property()
+    make_lease(property=prop, start_date="2026-01-01", end_date="2026-06-30")
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        make_lease(property=prop, start_date="2026-06-01", end_date="2026-12-31")
+
+
+def test_leases_that_merely_touch_at_the_boundary_still_collide(make_property, make_lease):
+    """The range is inclusive on both ends: one lease ending on the 30th and another
+    starting on the 30th genuinely contend for that day."""
+    prop = make_property()
+    make_lease(property=prop, start_date="2026-01-01", end_date="2026-06-30")
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        make_lease(property=prop, start_date="2026-06-30", end_date="2026-12-31")
+
+
+def test_consecutive_leases_on_the_same_property_are_allowed(make_property, make_lease):
+    prop = make_property()
+    make_lease(property=prop, start_date="2026-01-01", end_date="2026-06-30")
+    assert make_lease(property=prop, start_date="2026-07-01", end_date="2026-12-31").pk
+
+
+def test_a_draft_lease_may_overlap_an_active_one(make_property, make_lease):
+    """Only occupying statuses participate — otherwise you could never draft a successor
+    lease while the current one is still running."""
+    from apps.property_ops.models import Lease
+
+    prop = make_property()
+    make_lease(property=prop, start_date="2026-01-01", end_date="2026-12-31")
+    assert make_lease(
+        property=prop, start_date="2026-06-01", end_date="2027-05-31",
+        status=Lease.Status.DRAFT,
+    ).pk
+
+
+def test_different_units_of_one_property_can_be_let_simultaneously(make_property, make_lease):
+    from apps.inventory.models import Unit
+
+    prop = make_property(is_multi_unit=True)
+    a = Unit.objects.create(property=prop, unit_number="101", status=Unit.Status.AVAILABLE)
+    b = Unit.objects.create(property=prop, unit_number="102", status=Unit.Status.AVAILABLE)
+
+    make_lease(property=prop, unit=a)
+    assert make_lease(property=prop, unit=b).pk
+
+
+def test_the_same_unit_cannot_be_let_twice_over(make_property, make_lease):
+    from apps.inventory.models import Unit
+
+    prop = make_property(is_multi_unit=True)
+    unit = Unit.objects.create(property=prop, unit_number="101", status=Unit.Status.AVAILABLE)
+
+    make_lease(property=prop, unit=unit, start_date="2026-01-01", end_date="2026-06-30")
+    with pytest.raises(IntegrityError), transaction.atomic():
+        make_lease(property=prop, unit=unit, start_date="2026-03-01", end_date="2026-09-30")
+
+
+def test_a_lease_must_end_after_it_starts(make_lease):
+    with pytest.raises(IntegrityError), transaction.atomic():
+        make_lease(start_date="2026-06-01", end_date="2026-01-01")
+
+
+def test_deposit_refunds_and_deductions_cannot_exceed_the_amount_held(make_lease):
+    from apps.property_ops.models import Deposit
+
+    lease = make_lease()
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Deposit.objects.create(
+            lease=lease, amount=10000, held_amount=10000,
+            refunded_amount=8000, deducted_amount=5000,
+        )
+
+    assert Deposit.objects.create(
+        lease=lease, amount=10000, held_amount=10000,
+        refunded_amount=6000, deducted_amount=4000,
+    ).pk
+
+
+def test_a_maintenance_request_needs_a_reporter(make_property):
+    from apps.property_ops.models import MaintenanceRequest
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        MaintenanceRequest.objects.create(
+            property=make_property(), title="Leak", description="Kitchen tap"
+        )
+
+
+def test_one_vendor_profile_per_contact(db):
+    from apps.property_ops.models import Vendor
+
+    contact = make_contact()
+    Vendor.objects.create(contact=contact, service_category="Plumbing")
+    with pytest.raises(IntegrityError):
+        Vendor.objects.create(contact=contact, service_category="Electrical")

@@ -159,3 +159,43 @@ def make_deal(pipeline, make_user):
         return Deal.objects.create(**kwargs)
 
     return _make
+
+
+@pytest.fixture
+def make_lease(make_property, make_user):
+    """Leases default to ACTIVE so they participate in the overlap exclusion."""
+    from apps.contacts.models import Contact
+    from apps.property_ops.models import Lease
+
+    pm = make_user("property_manager")
+    counter = iter(range(1, 1000))
+
+    def _make(**kwargs):
+        n = next(counter)
+        kwargs.setdefault("reference_code", f"LSE-{n:04d}")
+        if "property" not in kwargs and "unit" not in kwargs:
+            kwargs["property"] = make_property()
+        kwargs.setdefault(
+            "tenant",
+            Contact.objects.create(
+                contact_type=Contact.ContactType.PERSON, first_name="Ten", last_name=f"A{n}"
+            ),
+        )
+        kwargs.setdefault(
+            "landlord",
+            Contact.objects.create(
+                contact_type=Contact.ContactType.PERSON, first_name="Land", last_name=f"L{n}"
+            ),
+        )
+        kwargs.setdefault("property_manager", pm)
+        kwargs.setdefault("lease_type", Lease.LeaseType.RESIDENTIAL)
+        kwargs.setdefault("start_date", "2026-01-01")
+        kwargs.setdefault("end_date", "2026-12-31")
+        kwargs.setdefault("rent_amount", 100000)
+        kwargs.setdefault("billing_frequency", Lease.BillingFrequency.MONTHLY)
+        kwargs.setdefault("security_deposit", 10000)
+        kwargs.setdefault("status", Lease.Status.ACTIVE)
+        kwargs.setdefault("created_by", pm)
+        return Lease.objects.create(**kwargs)
+
+    return _make
