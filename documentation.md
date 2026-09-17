@@ -3,20 +3,65 @@
 Quick daily notes on what got done on the backend and where things stand. Frontend-only work
 is tracked in the frontend repo's own log and omitted here.
 
-**Current state:** the backend is being rebuilt against `architecture.md` v3.2, which
-restructures it into nine apps under a strict import DAG. **There is no API right now** —
-only `/healthz/` and Django admin. The current pass builds schema only (models, migrations,
-constraints for ~90 tables); services and the HTTP API follow in a second pass.
-
-Steps 1–2 of the roadmap are done (`core`, `identity`). The other seven apps are scaffolded
-but empty. The previous working Phase-1 API is preserved at tag **`phase1-flat-layout`**.
+**Current state:** the backend has been rebuilt against `architecture.md` v3.2, which
+restructures it into nine apps under a strict import DAG. The **schema pass is complete** —
+all 98 tables, their constraints, and all 256 specified foreign keys are built and verified
+against the spec. **There is still no API** — only `/healthz/` and Django admin; services,
+selectors and the HTTP layer are the next pass. The previous working Phase-1 API is
+preserved at tag **`phase1-flat-layout`**.
 
 The demo logins below no longer exist: `seed_demo` was part of the old layout and was removed
 with it. A new seed command arrives with the API pass.
 
 ---
 
-## Day 11: Tue, Sep 1, 2026; restructure to architecture.md v3.2
+## Day 12: Fri, Sep 18, 2026; the whole schema, phases 3–10
+
+Built the remaining seven apps in DAG order and closed every deferred foreign key. 98 tables,
+82 tests, 15 import-linter contracts.
+
+**What landed**
+- `contacts` (4), `inventory` (9), `crm` (21), `property_ops` (10), `finance` (16),
+  `collaboration` (17), `platform` (8).
+- The four append-only tables — `crm_agent_location_point`, `finance_account_entry`,
+  `collaboration_signature_event`, `platform_audit_event` — with `UPDATE`/`DELETE` revoked
+  from the app role and tests proving the revoke actually bites.
+
+**Decisions worth remembering**
+- **Forward FKs needed almost no ceremony.** Django resolves same-project forward references
+  through lazy string refs and migration dependencies, so the raw-UUID-then-promote dance the
+  old code had begun was unnecessary. The rule used instead: a field pointing at a
+  not-yet-built app is declared in the phase that introduces its *target*, and the owning app
+  picks up a small follow-up migration. Only `identity` ↔ `collaboration` was genuinely
+  circular and actually required deferral.
+- **Where the spec offered a choice between a service-layer rule and a CHECK, the CHECK won**
+  whenever both operands live on the same row. A service can be bypassed by an import, a
+  shell, or a future endpoint that forgets; a CHECK cannot. That covers the mandatory deal
+  loss reason, the commission transaction/lease XOR, and "RECONCILED requires difference = 0".
+- **Inspecting generated DDL caught two silent index bugs.** `models.Index(opclasses=[...])`
+  over JSONB produced a *btree*, which can never serve the containment operator those columns
+  are filtered with — it would have built fine and never been used. And `PointField` already
+  emits its own GiST index, so the explicit one built the same index twice.
+- **`NULLS NOT DISTINCT` on `platform_dashboard_snapshot`.** ORG-scope snapshots have a null
+  `scope_id`, and Postgres treats NULLs as distinct in a plain unique index — so the nightly
+  job would have inserted a duplicate ORG row on every run.
+- **One spec-vs-framework conflict, resolved for the spec.** Django's `auth.E003` demands a
+  plainly unique `USERNAME_FIELD`; architecture.md §4 specifies a *partial* unique index on
+  `identity_user.email` (`WHERE deleted_at IS NULL`) so soft-deleting a user frees the
+  address. Kept the partial index, silenced the check, and documented that every email lookup
+  must filter `deleted_at`.
+
+**DoD**
+- Verified on a genuinely virgin database (`down -v`, confirmed zero tables): all 23 local
+  migrations apply in one pass. That is what proves the deferred-FK ordering is correct
+  rather than incrementally lucky.
+- `tests/test_spec_coverage.py` parses `architecture.md` and checks the built schema against
+  it, so a forgotten deferred FK — which otherwise leaves no trace in the owning app's code —
+  fails loudly.
+
+---
+
+## Day 11: Fri, Sep 18, 2026; restructure to architecture.md v3.2
 
 Replaced the flat seven-app layout with the nine DAG-ordered apps the spec requires, and got
 the repo back to a state where `migrate` is meaningful.
