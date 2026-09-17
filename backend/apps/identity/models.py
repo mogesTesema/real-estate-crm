@@ -18,10 +18,17 @@ class Company(models.Model):
     legal_name = models.CharField(max_length=200)
     registration_number = models.CharField(max_length=100, null=True, blank=True)
     tax_number = models.CharField(max_length=100, null=True, blank=True)
-    # `logo_file` (FK collaboration_file, nullable) is added by a later migration, once the
-    # collaboration app exists — architecture.md §4's migration-ordering note. identity and
-    # collaboration reference each other (collaboration_file.uploaded_by -> identity_user), so
-    # this is the one genuinely circular pair in the schema and the FK has to arrive second.
+    # Added by identity/0004, not 0001. identity and collaboration reference each other
+    # (collaboration_file.uploaded_by -> identity_user), so this is the one genuinely circular
+    # pair in the schema and the FK has to arrive after collaboration exists (§4's
+    # migration-ordering note). Nullable, as the spec requires.
+    logo_file = models.ForeignKey(
+        "collaboration.File",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="company_logos",
+    )
     email = models.EmailField()
     phone = models.CharField(max_length=30)
     website = models.URLField(null=True, blank=True)
@@ -132,8 +139,14 @@ class User(AbstractBaseUser, PermissionsMixin):
     phone = models.CharField(max_length=30, null=True, blank=True)
     first_name = models.CharField(max_length=150)
     last_name = models.CharField(max_length=150)
-    # `avatar_file` (FK collaboration_file, nullable) is added by a later migration — see the
-    # note on Company.logo_file above.
+    # Added by identity/0004 — see the note on Company.logo_file above.
+    avatar_file = models.ForeignKey(
+        "collaboration.File",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="user_avatars",
+    )
     employee_number = models.CharField(max_length=50, null=True, blank=True)
     job_title = models.CharField(max_length=150, null=True, blank=True)
     branch = models.ForeignKey(

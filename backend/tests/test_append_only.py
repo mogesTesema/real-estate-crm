@@ -17,6 +17,8 @@ from django.db import ProgrammingError, connection, transaction
 APPEND_ONLY_TABLES = [
     "crm_agent_location_point",
     "finance_account_entry",
+    "collaboration_signature_event",
+    "platform_audit_event",
 ]
 
 

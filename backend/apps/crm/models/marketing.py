@@ -108,8 +108,14 @@ class CampaignStep(models.Model):
     step_order = models.IntegerField()
     channel = models.CharField(max_length=20, choices=Channel.choices)
     delay_days = models.IntegerField(default=0)
-    # `template` (FK collaboration.Template, nullable) is added by a later crm migration once
-    # collaboration exists — §6's deferred-FK note.
+    # Added by crm/0003 once collaboration exists — §6's deferred-FK note.
+    template = models.ForeignKey(
+        "collaboration.Template",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="campaign_steps",
+    )
     subject = models.CharField(max_length=200, null=True, blank=True)
     body = models.TextField(null=True, blank=True)
     is_active = models.BooleanField(default=True)

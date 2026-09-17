@@ -657,8 +657,14 @@ class Expense(BaseModel):
         on_delete=models.SET_NULL,
         related_name="+",
     )
-    # `document` (FK collaboration.Document, nullable) added by finance/0003 after
-    # collaboration exists — the receipt or invoice scan backing this expense.
+    # Added by finance/0003 — the receipt or invoice scan backing this expense.
+    document = models.ForeignKey(
+        "collaboration.Document",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="expenses",
+    )
 
     class Meta:
         db_table = "finance_expense"
@@ -705,8 +711,14 @@ class OwnerStatement(BaseModel):
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
     issued_at = models.DateTimeField(null=True, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)
-    # `document` (FK collaboration.Document, nullable) added by finance/0003 — the rendered
-    # PDF sent to the landlord.
+    # Added by finance/0003 — the rendered PDF sent to the landlord.
+    document = models.ForeignKey(
+        "collaboration.Document",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="owner_statements",
+    )
 
     class Meta:
         db_table = "finance_owner_statement"

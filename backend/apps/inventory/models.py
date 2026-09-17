@@ -358,6 +358,15 @@ class Media(SoftDeleteModel):
     listing = models.ForeignKey(
         Listing, null=True, blank=True, on_delete=models.CASCADE, related_name="media"
     )
+    # Added by inventory/0002 once collaboration exists. Prefer `file` over `storage_key`
+    # for new rows; storage_key remains for media captured before collaboration was built.
+    file = models.ForeignKey(
+        "collaboration.File",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="inventory_media",
+    )
     storage_key = models.CharField(max_length=500, null=True, blank=True)
     media_type = models.CharField(max_length=20, choices=MediaType.choices)
     caption = models.CharField(max_length=200, null=True, blank=True)
@@ -375,10 +384,10 @@ class Media(SoftDeleteModel):
                 ),
                 name="inventory_media_has_target",
             ),
-            # Spec's constraint is (file_id IS NOT NULL OR storage_key IS NOT NULL). `file`
-            # does not exist yet, so this is the reachable half; inventory/0002 widens it.
+            # The spec's full form, now that `file` exists: a media row must point at a
+            # blob one way or the other.
             models.CheckConstraint(
-                condition=models.Q(storage_key__isnull=False),
+                condition=models.Q(file__isnull=False) | models.Q(storage_key__isnull=False),
                 name="inventory_media_has_blob_ref",
             ),
         ]

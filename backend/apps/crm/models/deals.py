@@ -352,7 +352,15 @@ class ClosingChecklistItem(models.Model):
     )
     completed_at = models.DateTimeField(null=True, blank=True)
     due_date = models.DateField(null=True, blank=True)
-    # `document` (FK collaboration.Document, nullable) added after collaboration exists.
+    # Added by crm/0003 once collaboration exists — the signed contract or receipt that
+    # satisfies this checklist item.
+    document = models.ForeignKey(
+        "collaboration.Document",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="checklist_items",
+    )
     sort_order = models.IntegerField(default=0)
 
     class Meta:
