@@ -155,7 +155,14 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
-    "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
+    # PasswordIsCurrent is a default rather than opt-in per view: a user whose initial
+    # password was chosen by their registrar must be confined to changing it, and one
+    # forgotten view would make that a suggestion. Views that must stay reachable meanwhile
+    # (/auth/me/, change-password) set `allow_stale_password = True`.
+    "DEFAULT_PERMISSION_CLASSES": (
+        "rest_framework.permissions.IsAuthenticated",
+        "apps.identity.api.permissions.PasswordIsCurrent",
+    ),
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_FILTER_BACKENDS": (
         "django_filters.rest_framework.DjangoFilterBackend",
@@ -165,6 +172,10 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "apps.core.pagination.DefaultPagination",
     "PAGE_SIZE": 25,
     "EXCEPTION_HANDLER": "apps.core.exceptions.crm_exception_handler",
+    # Login is reachable unauthenticated by definition, so it is the one endpoint that must
+    # be rate-limited from the start. Other scopes are added as their endpoints land.
+    "DEFAULT_THROTTLE_CLASSES": ("rest_framework.throttling.ScopedRateThrottle",),
+    "DEFAULT_THROTTLE_RATES": {"login": env("LOGIN_THROTTLE_RATE", "10/min")},
 }
 
 SIMPLE_JWT = {

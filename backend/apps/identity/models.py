@@ -105,17 +105,52 @@ class UserManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
         if not email:
             raise ValueError("Users must have an email address")
-        email = self.normalize_email(email)
+        # Django's normalize_email lowercases only the DOMAIN, so "Alice@acme.test" and
+        # "alice@acme.test" would be two distinct rows that both satisfy the partial unique
+        # index — one person able to log in, one silently unable to. Addresses are stored
+        # fully lowercased so the index means what it appears to mean.
+        email = self.normalize_email(email).lower()
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
         return user
 
     def create_superuser(self, email, password=None, **extra_fields):
+        """Create a superuser AND attach the `super_admin` role.
+
+        Without the role, ``manage.py createsuperuser`` produces an account that
+        ``apply_scope`` would show nothing to — `is_superuser` is a Django concept, while
+        every scoping decision in this system reads `identity_user_role`. Since this command
+        is the bootstrap for the very first administrator, it has to produce a usable one.
+
+        The role is seeded by identity/0002, so it is present in any migrated database. If it
+        somehow is not, the user is still created — a missing seed row should not make
+        superuser creation impossible.
+        """
         extra_fields.setdefault("is_staff", True)
         extra_fields.setdefault("is_superuser", True)
         extra_fields.setdefault("is_active", True)
-        return self.create_user(email, password, **extra_fields)
+        user = self.create_user(email, password, **extra_fields)
+
+        role = Role.objects.filter(code=Role.SUPER_ADMIN).first()
+        if role is not None:
+            UserRole.objects.get_or_create(user=user, role=role)
+        return user
+
+    def get_by_natural_key(self, username):
+        """Resolve a login identity, ignoring soft-deleted accounts.
+
+        `email` carries only a PARTIAL unique index (WHERE deleted_at IS NULL), so without
+        this filter two things go wrong: a soft-deleted user could still authenticate, and
+        once their address was reused the default implementation's ``get()`` would raise
+        MultipleObjectsReturned on a perfectly ordinary login.
+        """
+        return self.get(
+            **{
+                f"{self.model.USERNAME_FIELD}__iexact": username,
+                "deleted_at__isnull": True,
+            }
+        )
 
 
 class User(AbstractBaseUser, PermissionsMixin):
@@ -131,7 +166,8 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     The consequence: two rows CAN share an email when one is soft-deleted, so anything that
     resolves a user by email — the auth backend, password reset, portal login — MUST filter
-    ``deleted_at__isnull=True``. There is no such code yet; this lands with the services pass.
+    ``deleted_at__isnull=True``. ``UserManager.get_by_natural_key`` does this for the
+    authentication path; any new lookup by email must do the same.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -158,6 +194,13 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     is_superuser = models.BooleanField(default=False)
+    # Not in architecture.md §4's field list. Added because the spec describes no
+    # credential-delivery mechanism at all: registration has the registrar set an initial
+    # password, so the new user must be forced to replace a secret someone else chose. Set by
+    # `services.register_user`, cleared by `services.change_password`, and enforced by
+    # `api.permissions.PasswordIsCurrent`, which confines such a user to /me/ and
+    # /auth/change-password/ until they do.
+    must_change_password = models.BooleanField(default=False)
     deleted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -195,6 +238,20 @@ class Role(models.Model):
         FINANCE_ALL = "FINANCE_ALL", "Finance (all)"
         MARKETING_ALL = "MARKETING_ALL", "Marketing (all)"
         PORTAL_OWN = "PORTAL_OWN", "Portal (own)"
+
+    # The canonical system role codes, seeded by identity/0002 and aligned with the
+    # frontend's RoleKey. `code` is deliberately NOT constrained to these: architecture.md §4
+    # wants custom roles to work without hardcoded role-name switches, which is exactly why
+    # scoping keys off `data_scope` instead. These constants exist so application code stops
+    # sprinkling string literals, not to close the set.
+    SUPER_ADMIN = "super_admin"
+    OWNER = "owner"
+    MANAGER = "manager"
+    AGENT = "agent"
+    PROPERTY_MANAGER = "property_manager"
+    MARKETING = "marketing"
+    FINANCE = "finance"
+    PORTAL = "portal"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=100)

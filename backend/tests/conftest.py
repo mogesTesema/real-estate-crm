@@ -199,3 +199,50 @@ def make_lease(make_property, make_user):
         return Lease.objects.create(**kwargs)
 
     return _make
+
+
+# --- API fixtures -----------------------------------------------------------
+#
+# The suite was ORM-level until the identity API landed; these are the first HTTP fixtures.
+
+
+@pytest.fixture
+def api_client():
+    from rest_framework.test import APIClient
+
+    return APIClient()
+
+
+@pytest.fixture
+def auth_client():
+    """Build an APIClient authenticated as a given user.
+
+    Uses force_authenticate rather than a real token so tests exercise view logic without
+    paying for a login round-trip; test_auth.py covers the real token flow end to end.
+    """
+    from rest_framework.test import APIClient
+
+    def _as(user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    return _as
+
+
+@pytest.fixture
+def other_branch(company):
+    """A second branch, for proving branch-bound registrars cannot cross over."""
+    from apps.identity.models import Branch
+
+    return Branch.objects.create(company=company, name="Marina", code="MRN")
+
+
+@pytest.fixture
+def super_admin(make_user):
+    return make_user("super_admin")
+
+
+@pytest.fixture
+def manager(make_user):
+    return make_user("manager")
