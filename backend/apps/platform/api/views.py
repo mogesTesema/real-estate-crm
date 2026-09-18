@@ -10,7 +10,10 @@ from django.http import StreamingHttpResponse
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import mixins, viewsets
 from rest_framework.response import Response
+from rest_framework.settings import api_settings
 from rest_framework.views import APIView
+
+from apps.identity.permissions import IsStaff
 
 from .. import selectors
 from ..models import AuditEvent
@@ -37,6 +40,8 @@ class DashboardView(APIView):
     would be a second place for visibility rules to live, and the two would drift.
     """
 
+    permission_classes = [*api_settings.DEFAULT_PERMISSION_CLASSES, IsStaff]
+
     @extend_schema(
         parameters=[WindowSerializer],
         responses={200: OpenApiResponse(description="KPIs, scoped to the caller")},
@@ -55,6 +60,8 @@ class ReportIndexView(APIView):
     collision with a numeral suffix that moves whenever the routes are reordered — which
     renames a method in every regenerated client."""
 
+    permission_classes = [*api_settings.DEFAULT_PERMISSION_CLASSES, IsStaff]
+
     @extend_schema(responses={200: ReportIndexSerializer(many=True)})
     def get(self, request):
         return Response(ReportIndexSerializer(report_index(), many=True).data)
@@ -62,6 +69,8 @@ class ReportIndexView(APIView):
 
 class ReportView(APIView):
     """Named reports (SRS 3.13.2), with CSV export (SRS 3.13.4)."""
+
+    permission_classes = [*api_settings.DEFAULT_PERMISSION_CLASSES, IsStaff]
 
     @extend_schema(
         parameters=[ReportQuerySerializer],

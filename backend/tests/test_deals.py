@@ -72,7 +72,10 @@ class TestMoveStage:
         """The stage's probability is the pipeline's own forecast for anything sitting there,
         so it follows the move rather than being re-typed."""
         d = deal()
-        services.move_stage(d, stages["VIEWING"], actor=agent_user, reason="Booked.")
+        services.move_stage(
+            d, stages["VIEWING"], actor=agent_user, reason="Booked.",
+            next_action="Collect feedback",
+        )
         d.refresh_from_db()
         assert d.probability == stages["VIEWING"].probability
 
@@ -97,7 +100,10 @@ class TestMoveStage:
         still showed why it was lost."""
         d = deal()
         services.move_stage(d, stages["LOST"], actor=agent_user, reason="Bought elsewhere.")
-        services.move_stage(d, stages["VIEWING"], actor=agent_user, reason="They came back.")
+        services.move_stage(
+            d, stages["VIEWING"], actor=agent_user, reason="They came back.",
+            next_action="Re-qualify the budget",
+        )
         d.refresh_from_db()
         assert d.status == Deal.Status.OPEN
         assert d.lost_reason is None
@@ -106,7 +112,10 @@ class TestMoveStage:
     def test_a_move_to_the_same_stage_is_a_no_op(self, deal, agent_user):
         d = deal()
         before = d.stage_history.count()
-        services.move_stage(d, d.stage, actor=agent_user, reason="Nothing changed.")
+        services.move_stage(
+            d, d.stage, actor=agent_user, reason="Nothing changed.",
+            next_action="Nothing",
+        )
         assert d.stage_history.count() == before
 
     def test_stage_entered_at_is_stamped_on_every_move(self, deal, stages, agent_user):
@@ -114,7 +123,10 @@ class TestMoveStage:
         of the history table for every card on the board."""
         d = deal()
         first = d.stage_entered_at
-        services.move_stage(d, stages["VIEWING"], actor=agent_user, reason="Booked.")
+        services.move_stage(
+            d, stages["VIEWING"], actor=agent_user, reason="Booked.",
+            next_action="Collect feedback",
+        )
         d.refresh_from_db()
         assert d.stage_entered_at > first
 
@@ -175,7 +187,9 @@ class TestDealProperties:
 class TestBoard:
     def test_the_board_buckets_deals_by_stage(self, deal, stages, agent_user, pipeline):
         a, b = deal(), deal()
-        services.move_stage(b, stages["VIEWING"], actor=agent_user, reason="Booked.")
+        services.move_stage(
+            b, stages["VIEWING"], actor=agent_user, reason="Booked.", next_action="Feedback"
+        )
         data = selectors.board(agent_user, pipeline=pipeline)
         by_code = {row["stage"].code: row for row in data["stages"]}
         assert [d.id for d in by_code["NEW"]["deals"]] == [a.id]
@@ -214,7 +228,10 @@ class TestBoard:
         """SRS 3.4.3. Pulling a thousand deals across the wire to multiply two columns is the
         difference between a dashboard that loads and one that times out."""
         d = deal(estimated_value=1_000_000)  # NEW stage: 10%
-        services.move_stage(d, stages["VIEWING"], actor=agent_user, reason="Booked.")  # 45%
+        services.move_stage(
+            d, stages["VIEWING"], actor=agent_user, reason="Booked.",
+            next_action="Collect feedback",
+        )  # 45%
         deal(estimated_value=2_000_000)  # NEW: 10%
         forecast = selectors.weighted_pipeline(
             selectors.visible_deals(agent_user).filter(status=Deal.Status.OPEN)
@@ -254,7 +271,10 @@ class TestDealApi:
 
     def test_the_stage_history_is_readable(self, auth_client, deal, stages, agent_user):
         d = deal()
-        services.move_stage(d, stages["VIEWING"], actor=agent_user, reason="Booked.")
+        services.move_stage(
+            d, stages["VIEWING"], actor=agent_user, reason="Booked.",
+            next_action="Collect feedback",
+        )
         response = auth_client(agent_user).get(f"{self.URL}{d.id}/stage-history/")
         assert [row["reason"] for row in response.data] == ["Booked.", "Created."]
 
@@ -289,3 +309,100 @@ class TestDealApi:
             f"{self.URL}{d.id}/properties/", {"property": str(prop.id)}, format="json"
         )
         assert refused.status_code == 404
+
+
+class TestNextActionIsMandatoryToo:
+    """SRS 3.4.4 asks for "a mandatory reason **and next action**". The first pass enforced
+    only the reason."""
+
+    def test_a_move_to_an_open_stage_needs_a_next_action(self, deal, stages, agent_user):
+        with pytest.raises(ValidationError, match="what happens next"):
+            services.move_stage(
+                deal(), stages["VIEWING"], actor=agent_user, reason="Viewing booked."
+            )
+
+    def test_a_blank_next_action_does_not_count(self, deal, stages, agent_user):
+        with pytest.raises(ValidationError):
+            services.move_stage(
+                deal(), stages["VIEWING"], actor=agent_user, reason="Booked.", next_action="  "
+            )
+
+    def test_a_terminal_stage_needs_none(self, deal, stages, agent_user):
+        """There is nothing next by definition. Demanding one would train users to type
+        "n/a", which is how a mandatory field stops meaning anything."""
+        d = deal()
+        services.move_stage(d, stages["WON"], actor=agent_user, reason="Contract signed.")
+        d.refresh_from_db()
+        assert d.status == Deal.Status.WON
+
+    def test_a_terminal_move_clears_the_standing_next_action(self, deal, stages, agent_user):
+        d = deal()
+        services.move_stage(
+            d, stages["VIEWING"], actor=agent_user, reason="Booked.",
+            next_action="Send the offer letter",
+        )
+        services.move_stage(d, stages["LOST"], actor=agent_user, reason="Bought elsewhere.")
+        d.refresh_from_db()
+        assert d.next_action is None
+
+    def test_the_endpoint_refuses_it_too(self, auth_client, deal, stages, agent_user):
+        d = deal()
+        response = auth_client(agent_user).post(
+            f"/api/v1/deals/{d.id}/move/",
+            {"stage": str(stages["VIEWING"].id), "reason": "Booked."},
+            format="json",
+        )
+        assert response.status_code == 400
+        assert "next_action" in str(response.data)
+
+
+class TestBoardQueryParameters:
+    """A raw query parameter reached Django's UUID field and raised a bare
+    `django.core.exceptions.ValidationError`, which DRF does not render — a 500 from any
+    authenticated user with a typo in the query string."""
+
+    def test_a_malformed_owner_is_a_400_not_a_500(self, auth_client, deal, agent_user):
+        deal()
+        assert auth_client(agent_user).get(
+            "/api/v1/deals/board/?owner=not-a-uuid"
+        ).status_code == 400
+
+    def test_a_malformed_pipeline_is_a_400(self, auth_client, deal, agent_user):
+        deal()
+        assert auth_client(agent_user).get(
+            "/api/v1/deals/board/?pipeline=not-a-uuid"
+        ).status_code == 400
+
+    def test_a_valid_filter_still_works(self, auth_client, deal, agent_user):
+        d = deal()
+        response = auth_client(agent_user).get(f"/api/v1/deals/board/?owner={agent_user.id}")
+        assert response.status_code == 200
+        ids = [card["id"] for row in response.data["stages"] for card in row["deals"]]
+        assert str(d.id) in ids
+
+
+class TestUnlinkGoesThroughTheService:
+    def test_a_link_is_removed_through_its_endpoint(
+        self, auth_client, deal, agent_user, make_property, make_user
+    ):
+        from apps.crm.models import DealProperty
+
+        d = deal()
+        link = services.link_property(
+            d, property=make_property(managed_by=make_user("property_manager")), actor=agent_user
+        )
+        assert auth_client(agent_user).delete(
+            f"/api/v1/deal-properties/{link.id}/"
+        ).status_code == 204
+        assert not DealProperty.objects.filter(pk=link.pk).exists()
+
+    def test_a_link_on_an_invisible_deal_is_a_404(
+        self, auth_client, deal, agent_user, make_user, make_property
+    ):
+        link = services.link_property(
+            deal(), property=make_property(managed_by=make_user("property_manager")),
+            actor=agent_user,
+        )
+        assert auth_client(make_user("agent")).delete(
+            f"/api/v1/deal-properties/{link.id}/"
+        ).status_code == 404

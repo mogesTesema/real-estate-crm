@@ -144,7 +144,15 @@ class PropertySerializer(serializers.ModelSerializer):
     def get_primary_media(self, obj):
         # Reads the prefetched set rather than querying, so a 25-row page stays at one query
         # for the gallery instead of twenty-five.
-        cover = next((m for m in obj.media.all() if m.is_primary), None)
+        #
+        # The `deleted_at` check is in Python on purpose. The viewset prefetches a filtered
+        # queryset, but a serializer is also used on a bare instance — from another view, a
+        # management command, a test — where `obj.media.all()` is unfiltered and a
+        # soft-deleted row would be served as the cover image. Calling `.filter()` here would
+        # be correct and would silently discard the prefetch on every row of every page.
+        cover = next(
+            (m for m in obj.media.all() if m.is_primary and m.deleted_at is None), None
+        )
         return MediaSerializer(cover).data if cover else None
 
     @extend_schema_field(serializers.FloatField(allow_null=True))

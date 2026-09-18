@@ -647,3 +647,48 @@ class TestLeadApi:
             format="json",
         )
         assert response.status_code == 404
+
+
+class TestStatusTrailAccuracy:
+    """A status history that invents states is worse than none, because it is believed."""
+
+    @pytest.mark.parametrize("start", [Lead.Status.NEW, Lead.Status.CONTACTED, Lead.Status.QUALIFIED])
+    def test_conversion_records_the_status_the_lead_actually_held(
+        self, capture, pipeline, agent_user, start
+    ):
+        lead = capture()
+        Lead.objects.filter(pk=lead.pk).update(status=start)
+        lead.refresh_from_db()
+        services.convert_lead(lead, actor=agent_user, pipeline=pipeline)
+        last = lead.status_history.order_by("-changed_at").first()
+        assert (last.from_status, last.to_status) == (start, Lead.Status.CONVERTED)
+
+
+class TestUpdateLead:
+    def test_editing_a_lead_rescores_it(self, capture, agent_user, source):
+        """Budget, location and timeframe all feed the score (SRS 3.1.6). A lead edited to add
+        a budget that kept its original score would be ranked on stale information."""
+        lead = capture(source=source())
+        before = lead.score
+        services.update_lead(lead, actor=agent_user, budget_max=2_000_000)
+        lead.refresh_from_db()
+        assert lead.score == before + 20
+
+    def test_status_cannot_be_set_through_an_edit(self, capture, agent_user):
+        """It has its own service because it writes a history row."""
+        with pytest.raises(ValidationError):
+            services.update_lead(capture(), actor=agent_user, status=Lead.Status.QUALIFIED)
+
+    def test_the_assignment_cannot_be_set_through_an_edit(self, capture, agent_user):
+        with pytest.raises(ValidationError):
+            services.update_lead(capture(), actor=agent_user, assigned_agent=agent_user)
+
+    def test_the_endpoint_uses_the_service(self, auth_client, capture, agent_user, source):
+        lead = capture(source=source())
+        services.assign_lead(lead, to_user=agent_user, actor=agent_user)
+        before = lead.score
+        response = auth_client(agent_user).patch(
+            f"/api/v1/leads/{lead.id}/", {"budget_max": "2000000"}, format="json"
+        )
+        assert response.status_code == 200, response.data
+        assert response.data["score"] == before + 20

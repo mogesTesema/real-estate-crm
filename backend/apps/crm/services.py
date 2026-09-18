@@ -481,6 +481,53 @@ def change_lead_status(lead, new_status, *, actor, reason=None):
     return lead
 
 
+LEAD_WRITABLE = frozenset(
+    {
+        "title",
+        "description",
+        "priority",
+        "budget_min",
+        "budget_max",
+        "preferred_property_type",
+        "target_property",
+        "preferred_location",
+        "preferred_bedrooms",
+        "preferred_bathrooms",
+        "financing_status",
+        "expected_timeframe",
+        "next_follow_up_at",
+        "custom_data",
+    }
+)
+
+
+@transaction.atomic
+def update_lead(lead, *, actor, **fields):
+    """Patch a lead's descriptive fields.
+
+    `status` and the assignment are deliberately absent: both have their own service
+    (`change_lead_status`, `assign_lead`) because both write a history row, and a patch that
+    could set them would bypass the trail. Re-scores afterwards, since budget, location and
+    timeframe all feed the score (SRS 3.1.6) — a lead edited to add a budget that kept its
+    original score would be ranked on stale information.
+    """
+    unknown = set(fields) - LEAD_WRITABLE
+    if unknown:
+        raise ValidationError(
+            {name: "This field cannot be set through update_lead()." for name in unknown}
+        )
+    for name, value in fields.items():
+        setattr(lead, name, value)
+    lead.updated_by = actor
+    lead.save()
+
+    rescored = score_lead(lead)
+    if rescored != lead.score:
+        lead.score = rescored
+        lead.save(update_fields=["score", "updated_at"])
+    return lead
+
+
 @transaction.atomic
 def convert_lead(lead, *, actor, pipeline, stage=None, owner=None, **deal_fields):
     """Turn a qualified lead into a deal (SRS 3.1.8).
@@ -535,12 +582,16 @@ def convert_lead(lead, *, actor, pipeline, stage=None, owner=None, **deal_fields
             deal=deal, property=lead.target_property, is_primary=True
         )
 
+    # The status the lead actually held. Hardcoding QUALIFIED here made the trail claim a
+    # transition that never happened for any lead converted straight from NEW or CONTACTED —
+    # a status history that invents states is worse than none, because it is believed.
+    previous_status = lead.status
     lead.status = Lead.Status.CONVERTED
     lead.converted_at = timezone.now()
     lead.updated_by = actor
     lead.save(update_fields=["status", "converted_at", "updated_by", "updated_at"])
     LeadStatusHistory.objects.create(
-        lead=lead, from_status=Lead.Status.QUALIFIED, to_status=Lead.Status.CONVERTED,
+        lead=lead, from_status=previous_status, to_status=Lead.Status.CONVERTED,
         changed_by=actor, reason=f"Converted to deal {deal.reference_code}.",
     )
     signals.lead_converted.send_robust(sender=None, lead=lead, actor=actor, deal=deal)
@@ -591,6 +642,13 @@ def move_stage(deal, stage, *, actor, reason, next_action=None):
         raise ValidationError({"reason": "A stage move needs a reason (SRS 3.4.4)."})
     if stage.pipeline_id != deal.pipeline_id:
         raise ValidationError({"stage": "That stage belongs to a different pipeline."})
+    # SRS 3.4.4 asks for a reason *and a next action*. Required on every move except onto a
+    # terminal stage, where there is nothing next by definition — demanding one there would
+    # train users to type "n/a", which is how a mandatory field stops meaning anything.
+    if not stage.is_won and not stage.is_lost and not (next_action or "").strip():
+        raise ValidationError(
+            {"next_action": "Say what happens next (SRS 3.4.4)."}
+        )
 
     previous = deal.stage
     if previous.pk == stage.pk:
@@ -601,7 +659,10 @@ def move_stage(deal, stage, *, actor, reason, next_action=None):
     # follows the move rather than being re-typed.
     deal.probability = stage.probability
     deal.stage_entered_at = timezone.now()
-    deal.next_action = next_action
+    # Keep the standing next action when a terminal move supplies none, rather than silently
+    # blanking whatever the last open stage set.
+    terminal = stage.is_won or stage.is_lost
+    deal.next_action = next_action or (None if terminal else deal.next_action)
     fields = [
         "stage", "probability", "stage_entered_at", "next_action", "updated_by", "updated_at",
     ]

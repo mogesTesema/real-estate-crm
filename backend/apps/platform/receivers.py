@@ -207,7 +207,7 @@ def on_status_changed(sender, *, target, from_status, to_status, actor, reason=N
     )
 
 
-def on_listing_published(sender, *, listing, actor, from_status, to_status, **kwargs):
+def on_listing_status_changed(sender, *, listing, actor, from_status, to_status, **kwargs):
     record_event(
         action=AuditEvent.Action.UPDATE,
         entity_type="LISTING",
@@ -282,7 +282,7 @@ _WIRING = (
     (crm_signals.lead_converted, on_lead_converted),
     (crm_signals.gps_track_accessed, on_gps_track_accessed),
     (inventory_signals.status_changed, on_status_changed),
-    (inventory_signals.listing_published, on_listing_published),
+    (inventory_signals.listing_status_changed, on_listing_status_changed),
     (contact_signals.contacts_merged, on_contacts_merged),
     (contact_signals.contact_deleted, on_contact_deleted),
     (contact_signals.contacts_exported, on_contacts_exported),

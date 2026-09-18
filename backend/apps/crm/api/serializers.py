@@ -294,6 +294,20 @@ class LinkPropertySerializer(serializers.Serializer):
     is_primary = serializers.BooleanField(default=False)
 
 
+class BoardQuerySerializer(serializers.Serializer):
+    """Query parameters for the Kanban board.
+
+    Typed rather than forwarded: a raw `?owner=not-a-uuid` reaches Django's UUID field and
+    raises a bare `django.core.exceptions.ValidationError`, which DRF does not render — a 500
+    from any authenticated user with a typo.
+    """
+
+    pipeline = serializers.UUIDField(required=False)
+    owner = serializers.UUIDField(required=False)
+    deal_type = serializers.CharField(required=False, max_length=50)
+    currency = serializers.CharField(required=False, max_length=3)
+
+
 class BoardStageSerializer(serializers.Serializer):
     stage = PipelineStageSerializer()
     deals = DealSerializer(many=True)

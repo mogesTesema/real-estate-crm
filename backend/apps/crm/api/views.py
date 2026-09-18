@@ -11,7 +11,9 @@ from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
+from rest_framework.settings import api_settings
 
+from apps.identity.permissions import IsAgencyAdmin
 from apps.identity.selectors import ScopedQuerysetMixin
 
 from .. import selectors, services
@@ -24,6 +26,7 @@ from ..models import (
     PipelineStage,
 )
 from .serializers import (
+    BoardQuerySerializer,
     BoardSerializer,
     DealPropertySerializer,
     DealSerializer,
@@ -83,6 +86,10 @@ class RoutingRuleViewSet(viewsets.ModelViewSet):
 
     queryset = LeadRoutingRule.objects.all().order_by("priority", "created_at")
     serializer_class = RoutingRuleSerializer
+    # A routing rule is not a row with an owner, so row scoping has nothing to say about it.
+    # Without this gate any authenticated account — including a portal client — could write a
+    # priority-0 catch-all sending every inbound lead to itself.
+    permission_classes = [*api_settings.DEFAULT_PERMISSION_CLASSES, IsAgencyAdmin]
     filterset_fields = ["is_active", "assign_to_user", "assign_to_team"]
     ordering_fields = ["priority", "created_at", "name"]
     ordering = ["priority"]
@@ -188,10 +195,10 @@ class LeadViewSet(
             instance=lead, data=request.data, partial=kwargs.pop("partial", False)
         )
         payload.is_valid(raise_exception=True)
-        for name, value in payload.validated_data.items():
-            setattr(lead, name, value)
-        lead.updated_by = request.user
-        lead.save()
+        try:
+            lead = services.update_lead(lead, actor=request.user, **payload.validated_data)
+        except Exception as exc:  # noqa: BLE001 - narrowed by _translate
+            _translate(exc)
         return Response(LeadSerializer(lead).data)
 
     @extend_schema(request=LeadStatusSerializer, responses={200: LeadSerializer})
@@ -461,15 +468,20 @@ class DealViewSet(
         A *view* of the deals the caller may already see — it composes with row scoping and
         the same filters as the list, never a second way to reach a deal.
         """
+        # Validated, not passed through. `?owner=not-a-uuid` reached Django's UUID field as a
+        # raw string and raised a bare ValidationError that DRF does not render — a 500 on a
+        # malformed query string, from any authenticated user.
+        query = BoardQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        params = query.validated_data
+
         pipeline = (
-            get_object_or_404(Pipeline, pk=request.query_params["pipeline"])
-            if request.query_params.get("pipeline")
-            else None
+            get_object_or_404(Pipeline, pk=params["pipeline"]) if params.get("pipeline") else None
         )
         filters = {
-            key: request.query_params[key]
+            key: params[key]
             for key in ("owner", "deal_type", "currency")
-            if request.query_params.get(key)
+            if params.get(key)
         }
         data = selectors.board(request.user, pipeline=pipeline, filters=filters)
         forecast = selectors.weighted_pipeline(
@@ -488,6 +500,13 @@ class DealPropertyViewSet(
 
     def get_unscoped_queryset(self):
         return DealProperty.objects.select_related("deal", "property")
+
+    def destroy(self, request, *args, **kwargs):
+        # Through the service, not DestroyModelMixin's instance.delete(). Every other write
+        # in this module goes through `crm.services`, and the one that does not is the one
+        # that will still be calling the ORM directly when unlinking grows a side effect.
+        services.unlink_property(self.get_object(), actor=request.user)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class ViewingViewSet(

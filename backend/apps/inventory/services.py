@@ -465,7 +465,7 @@ def change_listing_status(listing, new_status, *, actor, reason=None):
     listing.updated_by = actor
     listing.save(update_fields=fields)
 
-    signals.listing_published.send_robust(
+    signals.listing_status_changed.send_robust(
         sender=None, listing=listing, actor=actor, from_status=current, to_status=new_status
     )
     return listing
@@ -555,19 +555,29 @@ def _media_parent_filter(media):
 
 @transaction.atomic
 def reorder_media(parent_filter, ordered_ids, *, actor):
-    """Apply a drag-and-drop ordering. `ordered_ids` is the gallery, front to back."""
+    """Apply a drag-and-drop ordering. `ordered_ids` is the gallery, front to back.
+
+    A partial list is allowed and the rest keep their relative order *after* it. Renumbering
+    only the listed rows left the others on their old positions — reordering two of three
+    images produced two rows both claiming position 0, and a gallery whose order then depended
+    on whatever the database happened to return.
+    """
     rows = {
         str(m.pk): m
-        for m in Media.objects.filter(deleted_at__isnull=True, **parent_filter)
+        for m in Media.objects.filter(deleted_at__isnull=True, **parent_filter).order_by(
+            "sort_order", "created_at"
+        )
     }
     unknown = set(map(str, ordered_ids)) - set(rows)
     if unknown:
         raise ValidationError({"order": f"Not media of this item: {sorted(unknown)}"})
-    for position, media_id in enumerate(ordered_ids):
-        row = rows[str(media_id)]
-        row.sort_order = position
+
+    listed = [str(media_id) for media_id in ordered_ids]
+    remainder = [key for key in rows if key not in set(listed)]
+    for position, key in enumerate([*listed, *remainder]):
+        rows[key].sort_order = position
     Media.objects.bulk_update(rows.values(), ["sort_order"])
-    return list(rows.values())
+    return sorted(rows.values(), key=lambda m: m.sort_order)
 
 
 @transaction.atomic

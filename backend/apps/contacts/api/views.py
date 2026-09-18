@@ -15,6 +15,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
+from apps.identity.permissions import IsStaff
 from apps.identity.selectors import ScopedQuerysetMixin
 
 from .. import selectors, services
@@ -71,6 +72,11 @@ class ContactViewSet(
 
     scope_resource = "contact"
     parser_classes = [JSONParser, FormParser, MultiPartParser]
+    #: Actions whose *reads* are staff tools rather than records. `duplicates` reports the
+    #: existence of contacts outside the caller's scope by design — safe between colleagues,
+    #: and a customer enumerating the company's contact book otherwise. `export` streams the
+    #: book in bulk. Writes are already closed to clients by the default StaffWrite.
+    STAFF_ONLY_ACTIONS = ("duplicates", "export", "import_csv", "merge")
     filterset_fields = ["contact_type", "is_active", "assigned_agent", "city", "country"]
     search_fields = ["first_name", "last_name", "company_name", "email", "phone"]
     # Declared explicitly. With OrderingFilter enabled globally and no `ordering_fields`, DRF
@@ -78,6 +84,11 @@ class ContactViewSet(
     # list endpoint into an enumeration oracle for them.
     ordering_fields = ["created_at", "updated_at", "first_name", "last_name", "company_name"]
     ordering = ["-created_at"]
+
+    def get_permissions(self):
+        if self.action in self.STAFF_ONLY_ACTIONS:
+            return [*super().get_permissions(), IsStaff()]
+        return super().get_permissions()
 
     def get_unscoped_queryset(self):
         return (

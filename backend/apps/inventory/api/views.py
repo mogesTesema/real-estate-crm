@@ -5,6 +5,7 @@ Every queryset runs through `ScopedQuerysetMixin`, per architecture.md §2.
 """
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import Prefetch
 from drf_spectacular.utils import extend_schema
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
@@ -73,7 +74,13 @@ class PropertyViewSet(
         return (
             selectors.live_properties()
             .select_related("property_type", "managed_by", "project", "building")
-            .prefetch_related("media", "owners__contact")
+            .prefetch_related(
+                # Filtered, not a bare "media": prefetch_related does not inherit the
+                # queryset's soft-delete filter, so a deleted row could still be served as
+                # the cover image.
+                Prefetch("media", queryset=selectors.live_media().order_by("sort_order")),
+                "owners__contact",
+            )
         )
 
     def get_serializer_class(self):

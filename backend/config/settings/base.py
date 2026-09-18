@@ -162,9 +162,15 @@ REST_FRAMEWORK = {
     # password was chosen by their registrar must be confined to changing it, and one
     # forgotten view would make that a suggestion. Views that must stay reachable meanwhile
     # (/auth/me/, change-password) set `allow_stale_password = True`.
+    # StaffWrite is a default rather than opt-in for the same reason PasswordIsCurrent is:
+    # the failure it prevents is not a wrong rule on one endpoint, it is an endpoint added in
+    # a later pass that nobody remembers to protect. Row scoping has no opinion about
+    # configuration tables, so without a function-level floor a rental tenant could write
+    # one. Views that genuinely serve client writes set `portal_writable = True`.
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
         "apps.identity.api.permissions.PasswordIsCurrent",
+        "apps.identity.permissions.StaffWrite",
     ),
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_FILTER_BACKENDS": (

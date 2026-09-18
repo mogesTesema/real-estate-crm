@@ -67,20 +67,22 @@ class Builder:
     def __init__(self, build):
         self._build = build
 
-    def __call__(self, user, model):
-        return self._build(user, model)
+    def __call__(self, user, model, scopes=None):
+        """`scopes` is the caller's already-resolved data_scope set, threaded through so a
+        `nested` arm re-entering the registry does not re-query the role table."""
+        return self._build(user, model, scopes)
 
     def __or__(self, other):
-        def combined(user, model):
-            return _or(self(user, model), other(user, model))
+        def combined(user, model, scopes=None):
+            return _or(self(user, model, scopes), other(user, model, scopes))
 
         return Builder(combined)
 
     def __and__(self, other):
         """Narrow one grant by another — "your own deals, **and** only the closed ones"."""
 
-        def combined(user, model):
-            return _and(self(user, model), other(user, model))
+        def combined(user, model, scopes=None):
+            return _and(self(user, model, scopes), other(user, model, scopes))
 
         return Builder(combined)
 
@@ -108,11 +110,11 @@ def _and(left, right):
 
 
 #: Grants every row of the resource.
-EVERYTHING = Builder(lambda user, model: UNFILTERED)
+EVERYTHING = Builder(lambda user, model, scopes=None: UNFILTERED)
 
 #: Grants no row. The default for any scope a resource does not mention; stated explicitly
 #: where the silence would otherwise read as an oversight.
-NOTHING = Builder(lambda user, model: None)
+NOTHING = Builder(lambda user, model, scopes=None: None)
 
 
 def equals(*paths, value):
@@ -125,7 +127,7 @@ def equals(*paths, value):
     `any_of`, which subqueries instead of joining; see the note on `apply_scope`.
     """
 
-    def build(user, model):
+    def build(user, model, scopes=None):
         resolved = value(user)
         if resolved is None:
             return None
@@ -146,7 +148,7 @@ def any_of(*paths, value):
     query single-table is what lets `apply_scope` stay free of `.distinct()`.
     """
 
-    def build(user, model):
+    def build(user, model, scopes=None):
         resolved = value(user)
         if resolved is None:
             return None
@@ -160,7 +162,7 @@ def any_of(*paths, value):
 
 def where(fn):
     """Escape hatch for a predicate that no combinator expresses. `fn(user) -> Q | None`."""
-    return Builder(lambda user, model: fn(user))
+    return Builder(lambda user, model, scopes=None: fn(user))
 
 
 # --- Named anchors (the vocabulary §2's doctrine is written in) --------------------------
@@ -235,17 +237,28 @@ def nested(path, resource):
     listing, is the case that forced this).
     """
 
-    def build(user, model):
-        predicate = _predicate_for(user, resource)
+    def build(user, model, scopes=None):
+        predicate = _predicate_for(user, resource, scopes=scopes)
         if predicate is None:
             return None
         parent = REGISTRY[resource].model
+        # A soft-deleted parent is not a visible parent. `_default_manager` on a
+        # SoftDeleteModel is unfiltered, so without this a property's gallery and its units
+        # outlived the property being archived — visible children of an invisible parent.
+        live = parent._default_manager.all()
+        soft_deleted = any(f.name == "deleted_at" for f in parent._meta.get_fields())
+        if soft_deleted:
+            live = live.filter(deleted_at__isnull=True)
         if predicate is UNFILTERED:
             # Every parent is visible — but a null parent link is not a visible parent, which
             # matters for a child like `inventory_media` whose three parent columns are each
             # nullable.
-            return Q(**{f"{path}__isnull": False})
-        return Q(**{f"{path}__in": parent._default_manager.filter(predicate).values("pk")})
+            return (
+                Q(**{f"{path}__in": live.values("pk")})
+                if soft_deleted
+                else Q(**{f"{path}__isnull": False})
+            )
+        return Q(**{f"{path}__in": live.filter(predicate).values("pk")})
 
     return Builder(build)
 
@@ -342,7 +355,7 @@ def shared_entity_ids(user, entity_type):
     )
 
 
-def _predicate_for(user, resource):
+def _predicate_for(user, resource, *, scopes=None):
     """The combined Q for `user` over `resource` — UNFILTERED for everything, None for nothing.
 
     Multiple roles are **OR-ed, not ranked**. `identity_user_role` has no `is_primary` flag,
@@ -353,12 +366,18 @@ def _predicate_for(user, resource):
     """
     spec = REGISTRY[resource]
 
+    # Resolved once and threaded through. `nested` re-enters this function per arm, so
+    # `media` — three arms, each reaching a parent resource — issued four identical role
+    # lookups for one list request.
+    if scopes is None:
+        scopes = scopes_for(user)
+
     predicate = None
-    for scope in scopes_for(user):
+    for scope in scopes:
         builder = spec.scopes.get(scope)
         if builder is None:
             continue  # deny by default: a scope the resource does not mention sees nothing
-        predicate = _or(predicate, builder(user, spec.model))
+        predicate = _or(predicate, builder(user, spec.model, scopes))
         if predicate is UNFILTERED:
             return UNFILTERED
 

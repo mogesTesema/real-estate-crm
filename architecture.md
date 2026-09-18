@@ -276,6 +276,33 @@ Rules:
 * Postgres RLS keyed on a session GUC is **optional** defense-in-depth for finance tables; the application scoping layer is **mandatory**.
 * Money mutations remain restricted to `finance.services` regardless of scope.
 
+#### Function-level RBAC is a second control, not the same one (normative, added v3.3)
+
+`apply_scope` decides *which rows*. It has, by construction, **no opinion about anything that
+is not a row somebody owns** — a routing rule, a bulk export, a report, an endpoint that
+writes. Building only the row layer leaves every one of those open to every authenticated
+account, portal clients included, which is not a subtle failure: a rental tenant could write a
+priority-0 catch-all routing rule sending every inbound lead to themselves.
+
+Three classes in `identity.permissions` provide the floor, keyed off `data_scope` so there is
+no second source of truth to drift from the scoping layer:
+
+| Class | Rule | Applied |
+| :--- | :--- | :--- |
+| `StaffWrite` | reads open (scoping decides), **writes require staff** | a `DEFAULT_PERMISSION_CLASS` — fail closed, so an endpoint added in a later pass is protected before anyone remembers to protect it. A view serving genuine client writes sets `portal_writable = True`. |
+| `IsStaff` | closed to portal clients, reads included | surfaces that are staff *tools* rather than records: the duplicate probe (which reports the existence of contacts outside the caller's scope by design), bulk export/import, merge, dashboards and reports |
+| `IsAgencyAdmin` | writes require `data_scope = ALL`; staff may read | agency configuration — `crm_lead_routing_rule` today |
+
+A **portal client** is defined as an account whose *only* `data_scope` is `PORTAL_OWN`, not by
+role code — §4 wants custom roles to work without hardcoded role-name switches. An account
+holding `PORTAL_OWN` alongside a staff scope is staff: an employee who also rents from the
+company is a real person, and reading that combination as "client" would lock them out of
+their job.
+
+This is the **floor, not the ceiling**. `identity_permission` / `identity_role_permission` (§4)
+remain the full per-action matrix the SRS role definitions describe, and are still unseeded;
+they refine these rules later without contradicting them.
+
 #### How `apply_scope` is wired (normative, added v3.3)
 
 `identity` sits near the bottom of the import DAG (§1.2) and may not name the models of the
@@ -294,6 +321,7 @@ A registration is a table of **`data_scope` → predicate**, one row per scope, 
 | `identity_record_share` is unioned **outside** the role loop, filtered on `expires_at`. | A share is a grant in its own right: it must reach a user whose roles grant nothing on that resource, which is the entire point of the table. Both `VIEW` and `EDIT` grant visibility; the distinction is a write-path question. |
 | To-many anchors are expressed as `pk IN (SELECT …)`, never as a JOIN. | A to-many JOIN multiplies outer rows, forcing `.distinct()` on every scoped list — and `DISTINCT` against pagination's `COUNT(*)` is a known cliff. `apply_scope` therefore issues no `DISTINCT`. |
 | An unregistered resource **raises**. | A silent fallback to the unfiltered queryset is how scoping layers quietly stop scoping. |
+| A **soft-deleted parent is not a visible parent**. | `_default_manager` on a `SoftDeleteModel` is unfiltered, so a nested rule that trusts it keeps a property's gallery and its units visible after the property is archived — visible children of an invisible parent. |
 
 Endpoints inherit `identity.selectors.ScopedQuerysetMixin` and set `scope_resource`. The mixin
 refuses a view that sets no resource, and refuses **at import time** a view that overrides

@@ -12,5 +12,7 @@ from django.dispatch import Signal
 #: kwargs: target, from_status, to_status, actor, reason
 status_changed = Signal()
 
+#: Any listing lifecycle move, not only publication — it was named `listing_published`
+#: while firing on withdrawal and expiry too, which made the audit rows read as publications.
 #: kwargs: listing, actor, from_status, to_status
-listing_published = Signal()
+listing_status_changed = Signal()

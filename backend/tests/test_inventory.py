@@ -726,3 +726,81 @@ class TestListingApi:
         )
         assert response.status_code == 200, response.data
         assert [m["storage_key"] for m in response.data][0] in ("2.jpg", "0.jpg")
+
+
+class TestChildrenOfAnArchivedProperty:
+    """`_default_manager` on a SoftDeleteModel is unfiltered, so a nested scope rule matched
+    children whose parent had been archived — a visible gallery for an invisible property."""
+
+    def test_media_disappears_with_its_property(self, db, new_property, pm):
+        from apps.identity.selectors import apply_scope
+
+        prop = new_property()
+        services.add_media(
+            actor=pm, property=prop, media_type=Media.MediaType.PHOTO, storage_key="a.jpg"
+        )
+        assert selectors.visible_media(pm).count() == 1
+        services.delete_property(prop, actor=pm)
+        assert selectors.visible_media(pm).count() == 0
+        assert apply_scope(Media.objects.all(), pm, "media").count() == 0
+
+    def test_units_disappear_with_their_property(self, db, new_property, pm):
+        from apps.identity.selectors import apply_scope
+
+        prop = new_property()
+        services.create_unit(actor=pm, property=prop, unit_number="101")
+        assert apply_scope(Unit.objects.all(), pm, "unit").count() == 1
+        services.delete_property(prop, actor=pm)
+        assert apply_scope(Unit.objects.all(), pm, "unit").count() == 0
+
+    def test_an_agency_wide_scope_does_not_see_them_either(self, db, new_property, pm, owner):
+        from apps.identity.selectors import apply_scope
+
+        prop = new_property()
+        services.add_media(
+            actor=pm, property=prop, media_type=Media.MediaType.PHOTO, storage_key="a.jpg"
+        )
+        services.delete_property(prop, actor=pm)
+        assert apply_scope(Media.objects.all(), owner, "media").count() == 0
+
+
+class TestGalleryOrderingIsTotal:
+    def test_a_partial_reorder_leaves_no_two_rows_on_one_position(
+        self, db, new_property, pm
+    ):
+        """Renumbering only the listed rows left the others where they were — reordering two
+        of three images produced two rows both claiming position 0, and a gallery whose order
+        then depended on whatever the database happened to return."""
+        listing = services.create_listing(
+            actor=pm, property=new_property(), listing_type=Listing.ListingType.SALE,
+            title="Gallery",
+        )
+        rows = [
+            services.add_media(
+                actor=pm, listing=listing, media_type=Media.MediaType.PHOTO,
+                storage_key=f"{n}.jpg",
+            )
+            for n in range(3)
+        ]
+        services.reorder_media({"listing": listing}, [rows[2].id], actor=pm)
+        positions = list(
+            Media.objects.filter(listing=listing).values_list("sort_order", flat=True)
+        )
+        assert sorted(positions) == [0, 1, 2]
+        assert selectors.gallery(listing).order_by("sort_order").first().storage_key == "2.jpg"
+
+
+class TestCoverImage:
+    def test_a_soft_deleted_row_is_never_served_as_the_cover(self, db, new_property, pm):
+        """The serializer is used on a bare instance too — from another view, a management
+        command, a test — where the viewset's filtered prefetch is not there to save it."""
+        from apps.inventory.api.serializers import PropertySerializer
+
+        prop = new_property()
+        media = services.add_media(
+            actor=pm, property=prop, media_type=Media.MediaType.PHOTO, storage_key="a.jpg"
+        )
+        assert PropertySerializer(prop).data["primary_media"] is not None
+        Media.objects.filter(pk=media.pk).update(deleted_at="2026-01-01T00:00:00Z")
+        prop.refresh_from_db()
+        assert PropertySerializer(prop).data["primary_media"] is None
