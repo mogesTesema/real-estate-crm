@@ -420,23 +420,185 @@ clients never appear in the staff directory.
 
 ---
 
-## 8. Reference
+## 8. Roles — what each one can do
 
-### The eight roles
+Eight roles. Two things vary by role: **which endpoints answer**, and **how much each one
+returns**. Both are listed per role below. Everything here was measured against a running
+server, not inferred.
 
-| `code` | `data_scope` | Sees |
-| :--- | :--- | :--- |
-| `super_admin` | `ALL` | Everything, plus user governance |
-| `owner` | `ALL` | Agency-wide |
-| `manager` | `BRANCH` | Their branch |
-| `agent` | `OWN` | Their own records; branch colleagues in summary form |
-| `property_manager` | `MANAGED_PROPERTIES` | Properties they manage and their children |
-| `marketing` | `MARKETING_ALL` | Campaigns, sources, landing pages |
-| `finance` | `FINANCE_ALL` | Finance objects agency-wide |
-| `portal` | `PORTAL_OWN` | Their own data only |
+Read the current values from the session instead of hardcoding this table —
+`me.grantable_role_codes` and `me.data_scopes` tell you exactly what to render, and they stay
+correct if an administrator defines a custom role.
 
-Fetch these from `GET /roles/` for labels and descriptions rather than hardcoding them —
-custom roles are supported.
+### At a glance
+
+| Role | `data_scope` | May register | May invite to the portal | `GET /users/` returns |
+| :--- | :--- | :--- | :--- | :--- |
+| `super_admin` | `ALL` | any staff role | any client type | everyone, full detail |
+| `owner` | `ALL` | `agent` | any client type | everyone, full detail |
+| `manager` | `BRANCH` | `owner` (own branch) | any client type | their branch, full detail |
+| `agent` | `OWN` | — | `BUYER`, `SELLER` | their branch, **summary only** |
+| `property_manager` | `MANAGED_PROPERTIES` | — | `TENANT`, `LANDLORD` | their branch, **summary only** |
+| `marketing` | `MARKETING_ALL` | — | — | everyone, full detail |
+| `finance` | `FINANCE_ALL` | — | — | everyone, full detail |
+| `portal` | `PORTAL_OWN` | — | — | only themselves |
+
+Everyone, whatever their role, can use `/auth/me/`, `/auth/change-password/`,
+`/auth/logout/`, `/auth/token/*`, the password-reset pair, and `GET /roles/`.
+
+**A user can hold more than one role, and the roles add up.** Someone who is both
+`property_manager` and `finance` gets the union: they may invite tenants and landlords *and*
+they see every user in full detail, because `FINANCE_ALL` widens what `MANAGED_PROPERTIES`
+alone would show. A narrow role never takes access away from a broad one. This is why
+`me.data_scopes` and `me.grantable_role_codes` are arrays, and why reading `roles[0]` will
+eventually give you the wrong answer.
+
+---
+
+### `super_admin` — Super Admin
+
+The highest authority: user governance, security and configuration. No role outranks it.
+
+| Endpoint | Result |
+| :--- | :--- |
+| `POST /users/` | Register **any** staff role, into any branch |
+| `GET /users/` · `{id}/` | Every user, full detail |
+| `PATCH /users/{id}/` | Edit any profile |
+| `DELETE /users/{id}/` · `reactivate/` | Deactivate and restore anyone |
+| `POST` / `DELETE /users/{id}/roles/` | Grant or revoke **any** staff role |
+| `POST /portal-users/` | Invite any client type |
+| `GET` / `DELETE /portal-users/` | See and suspend every client |
+
+Two refusals still apply, and they are deliberate: nobody may change their own roles or
+deactivate themselves, and the **last remaining administrator cannot be removed** — otherwise
+one call locks everyone out of user administration permanently.
+
+### `owner` — Broker / Agency Owner
+
+Agency-wide visibility. Registers and manages the agents under their agency.
+
+| Endpoint | Result |
+| :--- | :--- |
+| `POST /users/` | Register `agent` — and only `agent` |
+| `GET /users/` · `{id}/` | Every user, full detail |
+| `PATCH /users/{id}/` | Edit profiles |
+| `DELETE /users/{id}/` · `reactivate/` | Deactivate and restore |
+| `POST` / `DELETE /users/{id}/roles/` | Grant or revoke `agent` |
+| `POST /portal-users/` | Invite any client type |
+| `GET` / `DELETE /portal-users/` | See and suspend clients |
+
+Requesting any other role from `POST /users/` returns `403`. Render the "add user" form from
+`me.grantable_role_codes` and the option simply will not appear.
+
+### `manager` — Branch / Team Manager
+
+The branch's onboarding administrator. Registers the Broker/Agency Owners beneath them.
+
+| Endpoint | Result |
+| :--- | :--- |
+| `POST /users/` | Register `owner` — **into their own branch only** |
+| `GET /users/` · `{id}/` | **Their branch only**, full detail |
+| `PATCH /users/{id}/` | Edit profiles in their branch |
+| `DELETE /users/{id}/` · `reactivate/` | Deactivate and restore in their branch |
+| `POST` / `DELETE /users/{id}/roles/` | Grant or revoke `owner` |
+| `POST /portal-users/` | Invite any client type |
+| `GET` / `DELETE /portal-users/` | See and suspend clients |
+
+Two things to build for:
+
+- **They may omit `branch`** on `POST /users/` — theirs is used automatically. Passing a
+  *different* branch returns `403`, so either prefill their own branch or leave the field out.
+- **Anyone outside their branch is `404`**, not `403`. Render it as "not found"; the
+  distinction is deliberate so the endpoint cannot be used to probe which ids exist.
+
+### `agent` — Sales / Leasing Agent
+
+Own records, plus the colleagues they need in order to hand work over.
+
+| Endpoint | Result |
+| :--- | :--- |
+| `GET /users/` · `{id}/` | Their branch, **summary fields only** |
+| `POST /portal-users/` | Invite `BUYER` and `SELLER` clients |
+| `GET /portal-users/` | Their buyer and seller clients |
+| `DELETE /portal-users/{id}/` | Suspend a buyer or seller |
+| `POST /users/` | `403` — agents register nobody |
+
+**The summary shape is the thing to code for.** An agent's user list contains only
+`id`, `full_name`, `job_title`, `branch`, `team`, `is_active` — no `email`, no `phone`, no
+`roles`. It is enough to populate an assignee picker and nothing more. Type it as a union
+with the full shape:
+
+```ts
+type UserSummary = {
+  id: string; full_name: string; job_title: string | null;
+  branch: Branch | null; team: Team | null; is_active: boolean;
+};
+type User = UserSummary & { email: string; phone: string | null; roles: Role[]; /* … */ };
+
+// Which one you got depends on who is asking:
+const isFull = (u: UserSummary | User): u is User => 'email' in u;
+```
+
+Attempting to invite a `TENANT` or `LANDLORD` returns `403` — those are the property
+manager's clients.
+
+### `property_manager` — Property Manager
+
+Manages assigned properties: leases, tenants, maintenance, landlord reporting.
+
+| Endpoint | Result |
+| :--- | :--- |
+| `GET /users/` · `{id}/` | Their branch, **summary fields only** |
+| `POST /portal-users/` | Invite `TENANT` and `LANDLORD` clients |
+| `GET /portal-users/` | Their tenant and landlord clients |
+| `DELETE /portal-users/{id}/` | Suspend a tenant or landlord |
+| `POST /users/` | `403` — property managers register nobody |
+
+Same summary shape as the agent. Inviting a `BUYER` or `SELLER` returns `403`.
+
+Suspending is the right action when a lease ends: `DELETE /portal-users/{id}/` sets the
+client's status to `SUSPENDED`, their sign-in stops working immediately, and the record and
+its contract reference survive.
+
+### `marketing` — Marketing Staff
+
+| Endpoint | Result |
+| :--- | :--- |
+| `GET /users/` · `{id}/` | Every user, full detail |
+| `POST /users/` | `403` |
+| `POST /portal-users/` | `403` — marketing invites no clients |
+| `GET /portal-users/` | Empty |
+
+### `finance` — Finance / Accounts Staff
+
+| Endpoint | Result |
+| :--- | :--- |
+| `GET /users/` · `{id}/` | Every user, full detail |
+| `POST /users/` | `403` |
+| `POST /portal-users/` | `403` — finance invites no clients |
+| `GET /portal-users/` | Empty |
+
+### `portal` — the client
+
+A buyer, seller, rental tenant or landlord, signed in to see their own affairs.
+
+| Endpoint | Result |
+| :--- | :--- |
+| `GET /auth/me/` | Their session: `roles: [{code: "portal"}]`, `data_scopes: ["PORTAL_OWN"]` |
+| `PATCH /auth/me/` | Edit their own profile |
+| `POST /auth/change-password/` | |
+| `GET /portal-users/` · `{id}/` | **Themselves, and nobody else** |
+| `GET /users/` | Themselves only |
+| `POST /users/` · `POST /portal-users/` | `403` |
+
+Client isolation is absolute: one client can never reach another's records, and clients never
+appear in the staff directory. A client whose contract has ended cannot sign in at all — the
+`401` carries a distinct message telling them to contact their agent, which is worth showing
+verbatim rather than mapping to "wrong password".
+
+---
+
+## 9. Reference
 
 ### All endpoints
 
@@ -468,6 +630,23 @@ GET    /api/v1/roles/                      role catalogue
 GET    /healthz/                           liveness                    (public)
 ```
 
+### `GET /roles/`
+
+The role catalogue, for labels, descriptions and `data_scope` values. Use it to populate role
+pickers rather than hardcoding the eight codes — custom roles are supported, and they appear
+here too.
+
+```json
+{
+  "id": "3f950a70-…",
+  "code": "super_admin",
+  "name": "Super Admin",
+  "description": "Highest authority: agency-wide data plus system governance…",
+  "data_scope": "ALL",
+  "is_system_role": true
+}
+```
+
 ### Local setup
 
 ```bash
@@ -477,14 +656,8 @@ docker compose exec backend python manage.py createsuperuser   # your first admi
 ```
 
 The API is at `http://localhost:8000`. Set `FRONTEND_ORIGIN` in the backend environment to
-your dev server's URL (defaults to `http://localhost:5173`) — it drives both CORS and the
-password-reset link.
+your dev server's URL (it defaults to `http://localhost:5173`) — it drives both CORS and the
+link in password-reset emails.
 
-Create a Company and a Branch in Django admin (`/admin/`) before registering a `manager`;
-there is no org-structure API yet.
-
-### Not built yet
-
-So you can plan around it: portal *data* endpoints (a tenant's leases, rent history,
-maintenance requests), the Company/Branch/Team API, MFA and SSO. The endpoints listed above
-are the complete surface today.
+Create a Company and a Branch in Django admin at `/admin/` before registering a `manager`,
+since branch-scoped roles require one.
