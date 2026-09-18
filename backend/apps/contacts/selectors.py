@@ -11,7 +11,7 @@ from django.db.models.functions import Coalesce, Concat
 from apps.identity.selectors import apply_scope
 
 from .models import Contact
-from .services import normalize_email, normalize_national_id, normalize_phone
+from .normalization import normalize_email, normalize_national_id, normalize_phone
 
 
 def live_contacts():

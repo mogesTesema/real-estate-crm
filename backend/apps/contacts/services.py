@@ -17,7 +17,6 @@ import csv
 import io
 import logging
 
-import phonenumbers
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
@@ -25,6 +24,12 @@ from django.utils import timezone
 
 from . import signals
 from .models import Consent, Contact, ContactRelationship, ContactRole
+from .normalization import (  # noqa: F401 - re-exported; callers use contacts.services.*
+    _normalized,
+    normalize_email,
+    normalize_national_id,
+    normalize_phone,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,76 +66,6 @@ WRITABLE_FIELDS = frozenset(
         "is_active",
     }
 )
-
-
-# --- Normalisation ------------------------------------------------------------------------
-
-
-def normalize_email(value):
-    """Canonical form of an address: trimmed and lower-cased, or None.
-
-    The whole address, not only the domain. `BaseUserManager.normalize_email` lower-cases the
-    domain alone — correct to the letter of the RFC, where the local part is case-sensitive,
-    and wrong for de-duplication, where no real mail provider treats "Sam@" and "sam@" as two
-    people. `identity` learned this the same way.
-    """
-    if not value:
-        return None
-    value = value.strip().lower()
-    return value or None
-
-
-def normalize_phone(value, region=None):
-    """E.164 form of a number, or a best-effort fallback.
-
-    Deliberately **never raises**. A CSV of ten years of legacy contacts will contain numbers
-    that no parser accepts, and refusing the row loses the contact to keep the format tidy.
-    An unparseable number is stored stripped of separators so at least identical strings still
-    collide; `+` is preserved because its presence is the one signal that a number is already
-    international.
-    """
-    if not value:
-        return None
-    raw = value.strip()
-    if not raw:
-        return None
-    region = region or getattr(settings, "DEFAULT_PHONE_REGION", "AE")
-    try:
-        parsed = phonenumbers.parse(raw, region)
-        if phonenumbers.is_valid_number(parsed):
-            return phonenumbers.format_number(
-                parsed, phonenumbers.PhoneNumberFormat.E164
-            )
-    except phonenumbers.NumberParseException:
-        pass
-    digits = "".join(ch for ch in raw if ch.isdigit())
-    if not digits:
-        return None
-    return f"+{digits}" if raw.lstrip().startswith("+") else digits
-
-
-def normalize_national_id(value):
-    """Identity documents are quoted with and without separators; the digits are the key."""
-    if not value:
-        return None
-    cleaned = "".join(ch for ch in value if ch.isalnum()).upper()
-    return cleaned or None
-
-
-def _normalized(fields):
-    """Apply the three normalisers to whichever of their fields are present."""
-    out = dict(fields)
-    if "email" in out:
-        out["email"] = normalize_email(out["email"])
-    if "secondary_email" in out:
-        out["secondary_email"] = normalize_email(out["secondary_email"])
-    if "phone" in out:
-        out["phone"] = normalize_phone(out["phone"])
-    if "secondary_phone" in out:
-        out["secondary_phone"] = normalize_phone(out["secondary_phone"])
-    if "national_id" in out:
-        out["national_id"] = normalize_national_id(out["national_id"])
-    return out
 
 
 # --- Contacts -----------------------------------------------------------------------------
