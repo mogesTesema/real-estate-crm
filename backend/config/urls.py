@@ -5,7 +5,7 @@ Each app owns its own routes under `apps/<app>/api/urls.py` and this module moun
 the project able to import `apps.identity.api.urls` while no *app* may import another app's
 `api` package (architecture.md §1.2).
 
-`identity`, `contacts` and `inventory` are mounted; the rest arrive with their own passes.
+`identity`, `contacts`, `inventory` and `crm` are mounted; the rest arrive with their own passes.
 """
 from django.contrib import admin
 from django.http import JsonResponse
@@ -25,6 +25,7 @@ api_v1 = [
     path("", include("apps.identity.api.urls")),
     path("", include("apps.contacts.api.urls")),
     path("", include("apps.inventory.api.urls")),
+    path("", include("apps.crm.api.urls")),
 ]
 
 urlpatterns = [

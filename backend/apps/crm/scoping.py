@@ -13,6 +13,7 @@ from apps.identity.scoping import (
     managed_property,
     managed_property_any,
     my_team,
+    nested,
     owned_by,
     portal_contact,
     register,
@@ -26,7 +27,7 @@ def register_resources():
     from apps.core.choices import ScopedEntityType
     from apps.identity.models import Role
 
-    from .models import AgentFieldSession, Deal, Lead, Viewing
+    from .models import AgentFieldSession, Deal, DealProperty, Lead, Viewing
 
     scope = Role.DataScope
 
@@ -76,6 +77,14 @@ def register_resources():
             scope.PORTAL_OWN: portal_contact("primary_contact_id")
             & where(lambda user: Q(status=Deal.Status.WON)),
         },
+    )
+
+    # A deal-property link is only ever read or removed through its deal, so it inherits.
+    register(
+        "deal_property",
+        model=DealProperty,
+        entity_type=None,
+        scopes={s: nested("deal", "deal") for s in scope.values},
     )
 
     register(

@@ -11,6 +11,7 @@ contacts/inventory/crm/property_ops/finance — and deliberately does not list `
 Connected in `apps/platform/apps.py::ready()`.
 """
 from apps.contacts import signals as contact_signals
+from apps.crm import signals as crm_signals
 from apps.identity import signals
 from apps.inventory import signals as inventory_signals
 
@@ -217,7 +218,69 @@ def on_listing_published(sender, *, listing, actor, from_status, to_status, **kw
     )
 
 
+# --- crm (SRS 3.1, 3.4, 3.16.7) ------------------------------------------------------------
+
+
+def on_lead_captured(sender, *, lead, actor, assigned_to, rule=None, **kwargs):
+    record_event(
+        action=AuditEvent.Action.CREATE,
+        entity_type="LEAD",
+        entity_id=lead.pk,
+        actor=actor,
+        new_values={
+            "score": lead.score,
+            "assigned_to": str(assigned_to.pk) if assigned_to else None,
+            "routing_rule": rule.name if rule else None,
+            "possible_duplicate": lead.is_possible_duplicate,
+        },
+    )
+
+
+def on_lead_assigned(sender, *, lead, actor, from_user, to_user, reason=None, **kwargs):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type="LEAD",
+        entity_id=lead.pk,
+        actor=actor,
+        old_values={"assigned_agent": str(from_user.pk) if from_user else None},
+        new_values={
+            "assigned_agent": str(to_user.pk) if to_user else None,
+            "assigned_team": str(lead.assigned_team_id) if lead.assigned_team_id else None,
+            "reason": reason,
+        },
+    )
+
+
+def on_lead_converted(sender, *, lead, actor, deal, **kwargs):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type="LEAD",
+        entity_id=lead.pk,
+        actor=actor,
+        new_values={"converted_to_deal": deal.reference_code, "deal_id": str(deal.pk)},
+    )
+
+
+def on_gps_track_accessed(sender, *, session, actor, point_count, **kwargs):
+    # SRS 3.16.7 — "access to GPS tracks shall be role-restricted and audited". Row visibility
+    # is the restriction; this is the audit, and without it the requirement is half met.
+    record_event(
+        action=AuditEvent.Action.VIEW,
+        entity_type="AGENT_FIELD_SESSION",
+        entity_id=session.pk,
+        actor=actor,
+        new_values={
+            "agent_id": str(session.agent_id),
+            "points_disclosed": point_count,
+        },
+    )
+
+
 _WIRING = (
+    (crm_signals.lead_captured, on_lead_captured),
+    (crm_signals.lead_assigned, on_lead_assigned),
+    (crm_signals.lead_converted, on_lead_converted),
+    (crm_signals.gps_track_accessed, on_gps_track_accessed),
     (inventory_signals.status_changed, on_status_changed),
     (inventory_signals.listing_published, on_listing_published),
     (contact_signals.contacts_merged, on_contacts_merged),

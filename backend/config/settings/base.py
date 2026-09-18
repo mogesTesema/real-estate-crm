@@ -207,10 +207,17 @@ SPECTACULAR_SETTINGS = {
     "VERSION": "0.1.0",
     "SERVE_INCLUDE_SCHEMA": False,
     "COMPONENT_SPLIT_REQUEST": True,
-    # PortalProfile.ContractRefType is serialised from two places (the read serializer and
-    # the invite input), which drf-spectacular would otherwise name twice.
+    # drf-spectacular names an enum component after the *field*, so every model with a
+    # `status` column would claim the name "StatusEnum" and the loser gets a generated suffix
+    # like "Status44fEnum" — a name that changes whenever the components are reordered, which
+    # breaks every regenerated client. Each one is named explicitly instead.
     "ENUM_NAME_OVERRIDES": {
         "ContractRefTypeEnum": "apps.identity.models.PortalProfile.ContractRefType",
+        "PropertyStatusEnum": "apps.inventory.models.Property.Status",
+        "UnitStatusEnum": "apps.inventory.models.Unit.Status",
+        "ListingStatusEnum": "apps.inventory.models.Listing.Status",
+        "LeadStatusEnum": "apps.crm.models.Lead.Status",
+        "DealStatusEnum": "apps.crm.models.Deal.Status",
     },
 }
 
