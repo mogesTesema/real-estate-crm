@@ -13,10 +13,10 @@
 | SMS | `GATEWAY_SMS` | `LoggingSmsGateway` | same |
 | WhatsApp | `GATEWAY_WHATSAPP` | `LoggingWhatsAppGateway` | same |
 | Push | `GATEWAY_PUSH` | `LoggingPushGateway` | same |
-| E-sign provider | envelope `provider` field | `INTERNAL` (built-in click-to-sign) | `apps/collaboration/gateways.py` (esign ABC, phase D) |
-| Webhook HTTP transport | `WEBHOOK_TRANSPORT` | `mock` (in-memory outbox) | `apps/platform/integrations/transport.py` (phase F) |
-| Portal syndication / feeds | `INTEGRATION_ADAPTERS` | deterministic mocks | `apps/platform/integrations/` (phase F) |
-| AI provider | `AI_PROVIDER` | `mock` (deterministic, rule-based) | `apps/crm/ai.py` (phase F) |
+| E-sign provider | envelope `provider` field | `INTERNAL` (built-in click-to-sign) | `apps/collaboration/services/esign.py` |
+| Webhook HTTP transport | `WEBHOOK_TRANSPORT` | `urllib` (stdlib POST; tests use `mock` — in-memory outbox) | `apps/platform/webhooks.py` |
+| Portal syndication / feeds | `INTEGRATION_ADAPTERS` / `connection.config["adapter"]` | deterministic mocks | `apps/platform/integrations/` |
+| AI provider | `AI_PROVIDER` | `mock` (deterministic, rule-based) | `apps/crm/ai.py` |
 | Object storage | `AWS_STORAGE_BUCKET_NAME` etc. | **real** — MinIO in compose, any S3 in prod | django-storages (already wired) |
 
 Secrets are never stored in the database: `platform_connection.credentials_ref` is a pointer
@@ -36,7 +36,7 @@ Each section below follows the same six headings:
 - **Env vars**: `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`,
   `EMAIL_USE_TLS`, `DEFAULT_FROM_EMAIL`.
 - **Webhooks to expose**: delivery/bounce callbacks → `POST /api/public/webhooks/{id}/`
-  (phase F) feeding `update_message_status`.
+  feeding `update_message_status`.
 - **Test strategy**: send a lead acknowledgment against a sandbox inbox; verify a bounce
   callback flips the message to FAILED.
 
@@ -90,10 +90,10 @@ Each section below follows the same six headings:
 
 ## 6–8. Portal Syndication & MLS/IDX (PropertyFinder, Bayut/Dubizzle, MLS)
 - **SRS**: 3.10.1–3.10.4, 3.1.2.
-- **Mocked today** (phase F): deterministic adapters — push accepts everything and returns
-  derived external ids; inbound leads come from `connection.config["mock_inbound_leads"]`.
+- **Mocked today**: deterministic adapters — push accepts everything and returns
+  derived external ids; inbound leads come from `connection.config["fixture_leads"]`.
 - **Real provider & plan**: per-portal feed credentials; implement one adapter per portal
-  honouring the same `push_listings`/`pull_statuses`/`pull_leads` protocol; XML/JSON feed
+  honouring the same `push_listing`/`fetch_statuses`/`pull_leads` protocol; XML/JSON feed
   formats per portal spec.
 - **Env vars**: per connection via `credentials_ref` (e.g. `PF_API_KEY`).
 - **Webhooks to expose**: portals that push leads → `/api/public/webhooks/{id}/`.
@@ -138,7 +138,7 @@ Each section below follows the same six headings:
 
 ## 17. AI / LLM Provider (Anthropic Claude API)
 - **SRS**: 3.20.1–3.20.4.
-- **Mocked today** (phase F): `MockAIProvider` — deterministic; scoring = the rule engine's
+- **Mocked today**: `MockAIProvider` — deterministic; scoring = the rule engine's
   weights verbalized; next-best-action = decision table; chat = scripted slot-filling.
 - **Real provider & plan**: `ClaudeAIProvider` using the `anthropic` SDK
   (model: latest Claude), one method per protocol function, structured outputs;
@@ -148,7 +148,7 @@ Each section below follows the same six headings:
   provider.
 
 ## 18. Website Live Chat / Chatbot Widget
-- **SRS**: 3.20.4, 3.9.5. Backend endpoint (`/api/public/chat/qualify/`, phase F) is real;
+- **SRS**: 3.20.4, 3.9.5. Backend endpoint (`/api/public/chat/qualify/`) is real;
   the widget itself is a frontend deliverable consuming it.
 
 ## 19. Object Storage & CDN
@@ -163,7 +163,7 @@ Each section below follows the same six headings:
 
 ---
 
-## Appendix A — Outbound webhook event catalogue (phase F)
+## Appendix A — Outbound webhook event catalogue
 `lead.captured`, `lead.converted`, `listing.status_changed`, `deal.stage_moved`,
 `offer.accepted`, `transaction.status_changed`, `document.signed`.
 Signature: `X-Webhook-Signature: sha256=HMAC_SHA256(webhook.secret, raw_body)`;
@@ -177,6 +177,8 @@ EMAIL_HOST= EMAIL_PORT= EMAIL_HOST_USER= EMAIL_HOST_PASSWORD= EMAIL_USE_TLS= DEF
 GATEWAY_SMS= GATEWAY_WHATSAPP= GATEWAY_PUSH=
 # storage (real; compose provides MinIO)
 AWS_STORAGE_BUCKET_NAME= AWS_S3_ENDPOINT_URL= AWS_ACCESS_KEY_ID= AWS_SECRET_ACCESS_KEY=
-# phase F seams
-WEBHOOK_TRANSPORT=mock AI_PROVIDER=mock
+# platform seams (urllib = real stdlib delivery; mock = in-memory outbox for tests)
+WEBHOOK_TRANSPORT=urllib AI_PROVIDER=mock
+# e-sign
+ESIGN_PUBLIC_URL_TEMPLATE=/public/esign/{token}/ ESIGN_TOKEN_MAX_AGE_DAYS=30
 ```

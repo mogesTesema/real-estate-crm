@@ -76,7 +76,8 @@ def _default_currency() -> str:
     from apps.identity.models import Company
 
     company = Company.objects.first()
-    return company.default_currency if company else "AED"
+    # A company row with a blank default_currency must not put "" on money rows.
+    return (company.default_currency if company else None) or "AED"
 
 
 # --- Ledger ---------------------------------------------------------------------------------

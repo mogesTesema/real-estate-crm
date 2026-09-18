@@ -226,10 +226,15 @@ def assign_lead(lead, *, to_user=None, to_team=None, actor, reason=None):
     lead.save(update_fields=["assigned_agent", "assigned_team", "updated_at"])
 
     if to_user is not None:
-        LeadAssignment.objects.create(
-            lead=lead, from_user=previous, to_user=to_user, assigned_by=actor, reason=reason
-        )
-        if to_user.pk != actor.pk:
+        if actor is not None:
+            # `assigned_by` is NOT NULL by design — the trail names a person. An anonymous
+            # capture routed by rule has no person; the rule name in the audit event and
+            # the notification below are its record.
+            LeadAssignment.objects.create(
+                lead=lead, from_user=previous, to_user=to_user, assigned_by=actor,
+                reason=reason,
+            )
+        if actor is None or to_user.pk != actor.pk:
             # §1.2's notify orchestration. never raises, so the assignment cannot fail over
             # a notification.
             from apps.collaboration import services as collaboration_services

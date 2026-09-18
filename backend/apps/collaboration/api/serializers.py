@@ -98,6 +98,9 @@ from ..models import (  # noqa: E402
 
 
 class DocumentLinkSerializer(serializers.ModelSerializer):
+    #: Optional at the API too — the service defaults it to ATTACHMENT.
+    relationship_type = serializers.CharField(required=False, allow_blank=True)
+
     class Meta:
         model = DocumentLink
         fields = (
@@ -218,7 +221,33 @@ class ActivitySerializer(serializers.ModelSerializer):
         )
 
 
+class _ActiveUsers:
+    """Lazy queryset holder: resolving at import would race app loading."""
+
+    def all(self):
+        from apps.identity.models import User
+
+        return User.objects.filter(is_active=True)
+
+    def __iter__(self):
+        return iter(self.all())
+
+    def get(self, **kwargs):
+        return self.all().get(**kwargs)
+
+    @property
+    def model(self):  # spectacular introspects queryset.model for the schema
+        from apps.identity.models import User
+
+        return User
+
+
 class ActivityWriteSerializer(serializers.ModelSerializer):
+    #: Optional — the service defaults an unassigned task to its creator.
+    assigned_to = serializers.PrimaryKeyRelatedField(
+        queryset=_ActiveUsers(), required=False, allow_null=True
+    )
+
     class Meta:
         model = Activity
         fields = (
