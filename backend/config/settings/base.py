@@ -263,6 +263,21 @@ if AWS_STORAGE_BUCKET_NAME:
 # window." Configurable is the operative word — it varies by market and by team.
 LEAD_SLA_MINUTES = int(env("LEAD_SLA_MINUTES", "60"))
 
+# The region a bare local phone number is assumed to belong to when normalising to E.164.
+# De-duplication (SRS 3.1.3 / 3.1.10) matches on the normalised number, so "050 123 4567" and
+# "+971 50 123 4567" must collapse to one key — and that rule is per-country, which is why
+# this is configuration rather than a constant. An ISO 3166-1 alpha-2 code.
+DEFAULT_PHONE_REGION = env("DEFAULT_PHONE_REGION", "AE")
+
+# Trigram similarity at or above which two names are offered as a possible duplicate. Low
+# enough to catch a transposition or a missing letter, high enough that a common first name
+# alone does not flood the suggestion list.
+CONTACT_SIMILARITY_THRESHOLD = float(env("CONTACT_SIMILARITY_THRESHOLD", "0.4"))
+
+# A CSV import runs inline (no Celery on the free tier), so the request has to finish inside
+# the gateway timeout. Rows beyond this are refused with a message rather than truncated.
+CONTACT_IMPORT_MAX_ROWS = int(env("CONTACT_IMPORT_MAX_ROWS", "5000"))
+
 # --- Email ------------------------------------------------------------------
 # Used by the password-reset flow. Console backend by default: nothing is configured for real
 # delivery yet, and silently dropping a reset link is worse than printing it. Production sets

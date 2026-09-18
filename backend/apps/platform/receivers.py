@@ -1,4 +1,4 @@
-"""Turn `identity` events into audit rows.
+"""Turn domain events into audit rows.
 
 SRS 5.3 requires "a full audit trail for sensitive actions (login, data export, permission
 changes, document access, GPS track access)". Registration, role changes, deactivation and
@@ -10,6 +10,7 @@ contacts/inventory/crm/property_ops/finance — and deliberately does not list `
 
 Connected in `apps/platform/apps.py::ready()`.
 """
+from apps.contacts import signals as contact_signals
 from apps.identity import signals
 
 from .models import AuditEvent
@@ -18,6 +19,7 @@ from .services import record_event
 USER = "USER"
 USER_ROLE = "USER_ROLE"
 PORTAL_PROFILE = "PORTAL_PROFILE"
+CONTACT = "CONTACT"
 
 
 def on_user_registered(sender, *, user, actor, role_code, **kwargs):
@@ -131,7 +133,69 @@ def on_password_changed(sender, *, user, actor=None, **kwargs):
     )
 
 
+# --- contacts (architecture.md §1.3, SRS 5.3) ---------------------------------------------
+#
+# `contacts` cannot call record_event directly either: the DAG forbids contacts -> platform.
+# Same inversion, same reason. Only genuinely sensitive mutations are signalled — an audit row
+# per contact edit would bury the events that matter, and created_by/updated_by already carry
+# that on the row.
+
+
+def on_contacts_merged(sender, *, survivor, duplicate, actor, moved, **kwargs):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type=CONTACT,
+        entity_id=survivor.pk,
+        actor=actor,
+        old_values={"merged_contact_id": str(duplicate.pk)},
+        # `moved` is the per-relation row counts. A merge is irreversible in practice, so what
+        # it actually moved is the only way to reconstruct what the record looked like before.
+        new_values={"moved": moved},
+    )
+
+
+def on_contact_deleted(sender, *, contact, actor, **kwargs):
+    record_event(
+        action=AuditEvent.Action.DELETE,
+        entity_type=CONTACT,
+        entity_id=contact.pk,
+        actor=actor,
+        old_values={"display_name": str(contact)},
+    )
+
+
+def on_contacts_exported(sender, *, actor, row_count, fields, **kwargs):
+    # SRS 5.3 names data export explicitly. A CSV of the contact base is the highest-value
+    # thing a departing employee can take, so the size of what left is recorded, not just that
+    # an export happened.
+    record_event(
+        action=AuditEvent.Action.EXPORT,
+        entity_type=CONTACT,
+        actor=actor,
+        new_values={"row_count": row_count, "fields": fields},
+    )
+
+
+def on_contacts_imported(sender, *, actor, created, skipped, invalid, filename, **kwargs):
+    record_event(
+        action=AuditEvent.Action.CREATE,
+        entity_type=CONTACT,
+        actor=actor,
+        new_values={
+            "bulk_import": True,
+            "filename": filename,
+            "created": created,
+            "skipped_as_duplicate": skipped,
+            "invalid": invalid,
+        },
+    )
+
+
 _WIRING = (
+    (contact_signals.contacts_merged, on_contacts_merged),
+    (contact_signals.contact_deleted, on_contact_deleted),
+    (contact_signals.contacts_exported, on_contacts_exported),
+    (contact_signals.contacts_imported, on_contacts_imported),
     (signals.user_registered, on_user_registered),
     (signals.role_assigned, on_role_assigned),
     (signals.role_revoked, on_role_revoked),

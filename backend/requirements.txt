@@ -12,4 +12,8 @@ redis==5.2.1
 django-storages==1.14.4
 boto3==1.35.80
 python-dotenv==1.0.1
+# E.164 phone normalisation. Contact de-duplication (SRS 3.1.3 / 3.1.10) matches on the
+# normalised number, so "050 123 4567" and "+971501234567" have to collapse to one key —
+# which is a per-country rule set, not a regex.
+phonenumbers==9.0.39
 gunicorn==23.0.0
