@@ -8,22 +8,30 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied, ValidationError
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
+from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .. import services
-from ..models import Role, User
+from .. import services, signals
+from ..models import PortalProfile, Role, User
 from ..selectors import apply_scope, scopes_for
-from .permissions import CanRegisterUsers, PasswordIsCurrent
+from .permissions import CanInvitePortalUsers, CanRegisterUsers, PasswordIsCurrent
 from .serializers import (
     AssignRoleSerializer,
     ChangePasswordSerializer,
+    ForgotPasswordSerializer,
+    LoginSerializer,
+    LogoutSerializer,
     MeSerializer,
+    PortalAccessSerializer,
+    PortalProfileSerializer,
     RegistrationSerializer,
+    ResetPasswordSerializer,
     RoleSerializer,
     UserSerializer,
     UserSummarySerializer,
@@ -50,15 +58,123 @@ def _translate(exc):
     raise exc
 
 
-class ThrottledTokenObtainPairView(TokenObtainPairView):
-    """JWT login, rate-limited.
+def _client_meta(request) -> dict:
+    """The forensic context SRS 5.3 wants on a login record."""
+    forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    return {
+        "ip_address": (forwarded.split(",")[0].strip() or None)
+        if forwarded
+        else request.META.get("REMOTE_ADDR"),
+        "user_agent": request.META.get("HTTP_USER_AGENT", "")[:1000] or None,
+    }
 
-    An unthrottled login endpoint is a brute-force target, and this one is reachable
-    unauthenticated by definition.
+
+class LoginView(TokenObtainPairView):
+    """JWT login: rate-limited, portal-aware, and audited.
+
+    Three things happen here that stock `TokenObtainPairView` does not do:
+
+    * **Throttling** — this endpoint is reachable unauthenticated and checks passwords, so
+      unthrottled it is a brute-force target.
+    * **Portal eligibility** — SRS 3.11.2 grants a portal client access only while they hold
+      a completed contract. Checking at login (not just at invitation) means access ends when
+      the contract does, without having to deactivate the account.
+    * **Audit** — SRS 5.3 names login and failed login explicitly.
     """
 
+    serializer_class = LoginSerializer
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "login"
+
+    def post(self, request, *args, **kwargs):
+        meta = _client_meta(request)
+        try:
+            response = super().post(request, *args, **kwargs)
+        except AuthenticationFailed:
+            signals.user_login_failed.send(
+                sender=None, email=request.data.get("email", ""), **meta
+            )
+            raise
+
+        user = getattr(self.request, "_authenticated_user", None)
+        if user is not None:
+            signals.user_logged_in.send(sender=None, user=user, **meta)
+        return response
+
+
+class LogoutView(APIView):
+    """Revoke a refresh token.
+
+    Note the limit, which is inherent to JWT rather than to this implementation: an access
+    token already issued stays valid until it expires. `ACCESS_TOKEN_LIFETIME` is kept short
+    for that reason. This endpoint stops the *refresh* token being exchanged for new ones,
+    which is what ends a session.
+    """
+
+    permission_classes = [IsAuthenticated]
+    allow_stale_password = True
+
+    @extend_schema(
+        request=LogoutSerializer,
+        responses={205: OpenApiResponse(description="Refresh token revoked.")},
+    )
+    def post(self, request):
+        serializer = LogoutSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            RefreshToken(serializer.validated_data["refresh"]).blacklist()
+        except TokenError as exc:
+            raise ValidationError({"refresh": "That token is invalid or already revoked."}) from exc
+        return Response(status=status.HTTP_205_RESET_CONTENT)
+
+
+class ForgotPasswordView(APIView):
+    """Start a password reset.
+
+    **Always returns 200**, whether or not the address exists. An endpoint that distinguishes
+    the two is an account-enumeration oracle, and this one is public by necessity.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes: list = []
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "password_reset"
+
+    @extend_schema(
+        request=ForgotPasswordSerializer,
+        responses={
+            200: OpenApiResponse(description="Sent, if the account exists.")
+        },
+    )
+    def post(self, request):
+        serializer = ForgotPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        services.send_password_reset(email=serializer.validated_data["email"])
+        return Response(
+            {"detail": "If that email matches an account, reset instructions have been sent."}
+        )
+
+
+class ResetPasswordView(APIView):
+    """Complete a password reset with the emailed token."""
+
+    permission_classes = [AllowAny]
+    authentication_classes: list = []
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "password_reset"
+
+    @extend_schema(
+        request=ResetPasswordSerializer,
+        responses={200: OpenApiResponse(description="Password set.")},
+    )
+    def post(self, request):
+        serializer = ResetPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            services.reset_password(**serializer.validated_data)
+        except (DjangoPermissionDenied, DjangoValidationError) as exc:
+            _translate(exc)
+        return Response({"detail": "Password set. You can now sign in."})
 
 
 class MeView(APIView):
@@ -131,9 +247,15 @@ class UserViewSet(
     ordering = ["first_name", "last_name"]
 
     def get_queryset(self):
-        qs = User.objects.filter(deleted_at__isnull=True).select_related(
-            "branch", "branch__company", "team"
-        ).prefetch_related("user_roles__role")
+        qs = (
+            User.objects.filter(deleted_at__isnull=True)
+            # A portal client is not a colleague. They hold a login but belong to no branch
+            # and appear in no staff directory — SRS 3.11.6 makes their isolation a hard
+            # rule, and listing them here would leak clients to every staff member.
+            .exclude(user_roles__role__code=Role.PORTAL)
+            .select_related("branch", "branch__company", "team")
+            .prefetch_related("user_roles__role")
+        )
         return apply_scope(qs, self.request.user, "user")
 
     def get_serializer_class(self):
@@ -226,6 +348,75 @@ class UserViewSet(
             _translate(exc)
         user.refresh_from_db()
         return Response(UserSerializer(user).data)
+
+
+class PortalUserViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+    mixins.DestroyModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Portal clients — buyers, sellers, rental tenants and landlords.
+
+    Separate from `UserViewSet` because a client is not staff: they are created from a
+    contact plus a verified contract rather than from a role grant (SRS 3.11.2), they never
+    appear in the staff directory, and `destroy` suspends their access rather than
+    deactivating an employee account.
+    """
+
+    permission_classes = [IsAuthenticated, PasswordIsCurrent, CanInvitePortalUsers]
+    serializer_class = PortalProfileSerializer
+    filterset_fields = ["portal_type", "eligibility_status"]
+    ordering = ["-id"]
+
+    def get_queryset(self):
+        qs = PortalProfile.objects.select_related("user").filter(
+            user__deleted_at__isnull=True
+        )
+        # A portal client may see only their own profile; staff see the clients they may
+        # invite. SRS 3.11.6: no portal user may view another client's data.
+        user = getattr(self.request, "user", None)
+        if user is None or not user.is_authenticated:
+            # Only reachable during schema generation — the permission classes stop real
+            # anonymous requests. AnonymousUser has no pk, so filtering on it would raise.
+            return qs.none()
+        if user.is_superuser or services.invitable_portal_types(user):
+            return qs
+        return qs.filter(user=user)
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return PortalAccessSerializer
+        return PortalProfileSerializer
+
+    @extend_schema(request=PortalAccessSerializer, responses={201: PortalProfileSerializer})
+    def create(self, request, *args, **kwargs):
+        serializer = PortalAccessSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            user = services.grant_portal_access(
+                actor=request.user, **serializer.validated_data
+            )
+        except (DjangoPermissionDenied, DjangoValidationError) as exc:
+            _translate(exc)
+        return Response(
+            PortalProfileSerializer(user.portal_profile).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @extend_schema(responses={204: OpenApiResponse(description="Portal access suspended.")})
+    def destroy(self, request, *args, **kwargs):
+        profile = self.get_object()
+        try:
+            services.revoke_portal_access(
+                actor=request.user,
+                portal_profile=profile,
+                reason=request.data.get("reason", "") if request.data else "",
+            )
+        except (DjangoPermissionDenied, DjangoValidationError) as exc:
+            _translate(exc)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class RoleViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):

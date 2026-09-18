@@ -105,16 +105,27 @@ class TestScopedDirectory:
 
 class TestRoleChanges:
     def test_granting_a_role_obeys_the_registration_matrix(
-        self, auth_client, owner, make_user
+        self, auth_client, super_admin, make_user
     ):
         target = make_user("agent")
 
-        response = auth_client(owner).post(
+        response = auth_client(super_admin).post(
             f"{USERS_URL}{target.id}/roles/", {"role_code": "finance"}
         )
 
         assert response.status_code == 200
         assert {r["code"] for r in response.data["roles"]} == {"agent", "finance"}
+
+    def test_an_owner_cannot_grant_a_role_the_documents_never_gave_them(
+        self, auth_client, owner, make_user
+    ):
+        """SRS 3.15.2 gives the owner Sales/Leasing Agents and nothing else."""
+        target = make_user("agent")
+        for code in ("property_manager", "marketing", "finance"):
+            response = auth_client(owner).post(
+                f"{USERS_URL}{target.id}/roles/", {"role_code": code}
+            )
+            assert response.status_code == 403, code
 
     def test_an_owner_cannot_grant_a_role_above_their_authority(
         self, auth_client, owner, make_user
@@ -145,13 +156,13 @@ class TestRoleChanges:
         assert not target.user_roles.exists()
 
     def test_granting_the_same_role_twice_is_idempotent(
-        self, auth_client, owner, make_user
+        self, auth_client, super_admin, make_user
     ):
         target = make_user("agent")
         url = f"{USERS_URL}{target.id}/roles/"
 
-        auth_client(owner).post(url, {"role_code": "finance"})
-        response = auth_client(owner).post(url, {"role_code": "finance"})
+        auth_client(super_admin).post(url, {"role_code": "finance"})
+        response = auth_client(super_admin).post(url, {"role_code": "finance"})
 
         assert response.status_code == 200
         assert target.user_roles.filter(role__code="finance").count() == 1

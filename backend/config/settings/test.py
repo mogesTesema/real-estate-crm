@@ -25,3 +25,14 @@ DATABASES = {
 
 # Faster hashing in tests.
 PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
+
+# Throttling off by default in tests. The suite logs in hundreds of times through a shared
+# LocMem cache, so a 10/min login limit makes whichever test happens to run last fail — a
+# flake that has nothing to do with the code under test. `tests/test_throttling.py` turns it
+# back on explicitly for the tests that are actually about rate limiting.
+# The scopes must still be PRESENT: ScopedRateThrottle treats a missing scope as a
+# misconfiguration and raises, whereas an explicit None means "unlimited".
+REST_FRAMEWORK = {  # noqa: F405
+    **REST_FRAMEWORK,  # noqa: F405
+    "DEFAULT_THROTTLE_RATES": {"login": None, "password_reset": None},
+}

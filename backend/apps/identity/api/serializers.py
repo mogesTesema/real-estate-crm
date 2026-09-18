@@ -5,8 +5,11 @@ table with no `is_primary` flag, so "the user's role" is genuinely undefined whe
 attached. The pre-v3.2 API returned a single `role` string; consumers need updating.
 """
 from rest_framework import serializers
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
-from ..models import Branch, Company, Role, Team, User
+from .. import services
+from ..models import Branch, Company, PortalProfile, Role, Team, User
 from ..services import STAFF_ROLE_CODES
 
 
@@ -183,3 +186,112 @@ class ChangePasswordSerializer(serializers.Serializer):
     new_password = serializers.CharField(
         write_only=True, style={"input_type": "password"}
     )
+
+
+# --- Authentication lifecycle ---------------------------------------------------------------
+
+
+class LoginSerializer(TokenObtainPairSerializer):
+    """JWT login that also enforces portal eligibility.
+
+    A portal client's right to be here expires with their contract (SRS 3.11.2), so the check
+    belongs at every login rather than only at invitation. Stashes the authenticated user on
+    the request so the view can audit the success without re-querying.
+    """
+
+    def validate(self, attrs):
+        data = super().validate(attrs)
+
+        blocked = services.portal_login_blocked_reason(self.user)
+        if blocked:
+            raise AuthenticationFailed(blocked, code="portal_access_inactive")
+
+        request = self.context.get("request")
+        if request is not None:
+            request._authenticated_user = self.user
+        return data
+
+
+class LogoutSerializer(serializers.Serializer):
+    refresh = serializers.CharField(write_only=True)
+
+
+class ForgotPasswordSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+
+class ResetPasswordSerializer(serializers.Serializer):
+    uid = serializers.CharField()
+    token = serializers.CharField()
+    new_password = serializers.CharField(
+        write_only=True, style={"input_type": "password"}
+    )
+
+
+# --- Portal ----------------------------------------------------------------------------------
+
+
+class PortalProfileSerializer(serializers.ModelSerializer):
+    """A portal client as staff see them."""
+
+    email = serializers.EmailField(source="user.email", read_only=True)
+    full_name = serializers.CharField(source="user.full_name", read_only=True)
+    is_active = serializers.BooleanField(source="user.is_active", read_only=True)
+    must_change_password = serializers.BooleanField(
+        source="user.must_change_password", read_only=True
+    )
+
+    class Meta:
+        model = PortalProfile
+        fields = [
+            "id",
+            "email",
+            "full_name",
+            "contact",
+            "portal_type",
+            "eligibility_status",
+            "completed_contract_ref_type",
+            "completed_contract_ref_id",
+            "is_verified",
+            "last_access_at",
+            "is_active",
+            "must_change_password",
+        ]
+        read_only_fields = fields
+
+
+class PortalAccessSerializer(serializers.Serializer):
+    """Input for inviting a client to the portal.
+
+    Deliberately takes the *contract* rather than a name and email: the client's identity is
+    read from the contact by whichever app owns the contract, so staff cannot invent a login
+    for someone who has no contract (SRS 3.11.2).
+    """
+
+    contact_id = serializers.UUIDField()
+    portal_type = serializers.ChoiceField(choices=PortalProfile.PortalType.choices)
+    contract_ref_type = serializers.ChoiceField(
+        choices=PortalProfile.ContractRefType.choices
+    )
+    contract_ref_id = serializers.UUIDField()
+    password = serializers.CharField(write_only=True, style={"input_type": "password"})
+
+    def validate(self, attrs):
+        # A buyer is not established by a lease, nor a tenant by a sale. Catching the
+        # mismatch here gives a clear message instead of a bare "no contract confirms this".
+        expected = {
+            "BUYER": "TRANSACTION",
+            "SELLER": "TRANSACTION",
+            "TENANT": "LEASE",
+            "LANDLORD": "LEASE",
+        }[attrs["portal_type"]]
+        if attrs["contract_ref_type"] != expected:
+            raise serializers.ValidationError(
+                {
+                    "contract_ref_type": (
+                        f"A {attrs['portal_type'].lower()} portal is established by a "
+                        f"{expected.lower()}, not a {attrs['contract_ref_type'].lower()}."
+                    )
+                }
+            )
+        return attrs

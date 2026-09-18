@@ -42,6 +42,9 @@ DJANGO_APPS = [
 THIRD_PARTY_APPS = [
     "rest_framework",
     "rest_framework_simplejwt",
+    # Server-side token revocation. Without it `is_active=False` is the only way to end a
+    # session, and a refresh token stays exchangeable for its full 7-day life.
+    "rest_framework_simplejwt.token_blacklist",
     "drf_spectacular",
     "django_filters",
     "corsheaders",
@@ -175,12 +178,25 @@ REST_FRAMEWORK = {
     # Login is reachable unauthenticated by definition, so it is the one endpoint that must
     # be rate-limited from the start. Other scopes are added as their endpoints land.
     "DEFAULT_THROTTLE_CLASSES": ("rest_framework.throttling.ScopedRateThrottle",),
-    "DEFAULT_THROTTLE_RATES": {"login": env("LOGIN_THROTTLE_RATE", "10/min")},
+    "DEFAULT_THROTTLE_RATES": {
+        "login": env("LOGIN_THROTTLE_RATE", "10/min"),
+        # Password reset is public and sends mail, so it is both a brute-force and a
+        # mail-flooding vector.
+        "password_reset": env("PASSWORD_RESET_THROTTLE_RATE", "5/min"),
+    },
 }
 
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
+    # 15 minutes, not 60. A JWT cannot be recalled once issued, so the access-token lifetime
+    # IS the window in which a deactivated user, a revoked role, or a suspended portal client
+    # still has reach. Shortening it is the only real mitigation short of introspecting every
+    # request against the database, which would defeat the point of a stateless token.
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    # Rotate on refresh and blacklist the old token, so a stolen refresh token stops working
+    # as soon as the legitimate holder next refreshes.
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
     "USER_ID_FIELD": "id",
     "USER_ID_CLAIM": "user_id",
 }
@@ -191,6 +207,11 @@ SPECTACULAR_SETTINGS = {
     "VERSION": "0.1.0",
     "SERVE_INCLUDE_SCHEMA": False,
     "COMPONENT_SPLIT_REQUEST": True,
+    # PortalProfile.ContractRefType is serialised from two places (the read serializer and
+    # the invite input), which drf-spectacular would otherwise name twice.
+    "ENUM_NAME_OVERRIDES": {
+        "ContractRefTypeEnum": "apps.identity.models.PortalProfile.ContractRefType",
+    },
 }
 
 # --- Celery -----------------------------------------------------------------
@@ -236,6 +257,20 @@ if AWS_STORAGE_BUCKET_NAME:
     AWS_S3_REGION_NAME = env("AWS_S3_REGION_NAME", "us-east-1")
     AWS_S3_USE_SSL = env_bool("AWS_S3_USE_SSL", False)
     AWS_QUERYSTRING_AUTH = True
+
+# --- Email ------------------------------------------------------------------
+# Used by the password-reset flow. Console backend by default: nothing is configured for real
+# delivery yet, and silently dropping a reset link is worse than printing it. Production sets
+# EMAIL_BACKEND plus the EMAIL_HOST_* vars.
+EMAIL_BACKEND = env(
+    "EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend"
+)
+EMAIL_HOST = env("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(env("EMAIL_PORT", "25"))
+EMAIL_HOST_USER = env("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", False)
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", "no-reply@example.com")
 
 # --- i18n / tz --------------------------------------------------------------
 LANGUAGE_CODE = "en-us"

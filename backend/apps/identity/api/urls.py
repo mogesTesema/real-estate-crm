@@ -10,21 +10,29 @@ from rest_framework_simplejwt.views import TokenRefreshView
 
 from .views import (
     ChangePasswordView,
+    ForgotPasswordView,
+    LoginView,
+    LogoutView,
     MeView,
+    PortalUserViewSet,
+    ResetPasswordView,
     RoleViewSet,
-    ThrottledTokenObtainPairView,
     UserViewSet,
 )
 
 router = DefaultRouter()
 router.register("users", UserViewSet, basename="user")
+router.register("portal-users", PortalUserViewSet, basename="portal-user")
 router.register("roles", RoleViewSet, basename="role")
 
 auth_patterns = [
-    path("token/", ThrottledTokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("token/", LoginView.as_view(), name="token_obtain_pair"),
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+    path("logout/", LogoutView.as_view(), name="logout"),
     path("me/", MeView.as_view(), name="me"),
     path("change-password/", ChangePasswordView.as_view(), name="change_password"),
+    path("forgot-password/", ForgotPasswordView.as_view(), name="forgot_password"),
+    path("reset-password/", ResetPasswordView.as_view(), name="reset_password"),
 ]
 
 urlpatterns = [

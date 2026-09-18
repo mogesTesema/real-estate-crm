@@ -246,3 +246,105 @@ def super_admin(make_user):
 @pytest.fixture
 def manager(make_user):
     return make_user("manager")
+
+
+@pytest.fixture(autouse=True)
+def _clear_throttle_cache():
+    """Throttle counters live in the cache and outlive a test's database rollback.
+
+    Without this, a test that exhausts a rate limit leaks the counter into whatever runs
+    next — the flake is real but looks like it belongs to the innocent test.
+    """
+    from django.core.cache import cache
+
+    cache.clear()
+    yield
+    cache.clear()
+
+
+# --- Contract fixtures, for portal eligibility ------------------------------
+
+
+@pytest.fixture
+def make_contact(db):
+    """A client of the firm. Portal access is granted to a contact, never invented."""
+    from apps.contacts.models import Contact
+
+    counter = iter(range(1, 1000))
+
+    def _make(**kwargs):
+        n = next(counter)
+        kwargs.setdefault("contact_type", Contact.ContactType.PERSON)
+        kwargs.setdefault("first_name", "Client")
+        kwargs.setdefault("last_name", f"Number{n}")
+        kwargs.setdefault("email", f"client{n}@example.test")
+        return Contact.objects.create(**kwargs)
+
+    return _make
+
+
+@pytest.fixture
+def make_transaction(make_property, make_deal):
+    """A sale. `Transaction.deal` is nullable, and a transaction without one can confirm
+    no contact at all — which some tests rely on."""
+    from apps.crm.models import Transaction
+
+    counter = iter(range(1, 1000))
+
+    def _make(*, contact=None, status=None, property=None, **kwargs):
+        n = next(counter)
+        deal = make_deal(primary_contact=contact) if contact is not None else None
+        return Transaction.objects.create(
+            deal=deal,
+            property=property or make_property(),
+            transaction_type=Transaction.TransactionType.SALE,
+            reference_code=f"TXN-{n:04d}",
+            gross_amount=1000000,
+            currency="AED",
+            transaction_date="2026-01-01",
+            status=status or Transaction.Status.COMPLETED,
+            **kwargs,
+        )
+
+    return _make
+
+
+@pytest.fixture
+def make_lease_for(make_lease):
+    """A lease with explicit tenant and landlord contacts."""
+
+    def _make(*, tenant=None, landlord=None, status=None, **kwargs):
+        from apps.property_ops.models import Lease
+
+        if tenant is not None:
+            kwargs["tenant"] = tenant
+        if landlord is not None:
+            kwargs["landlord"] = landlord
+        kwargs.setdefault("status", status or Lease.Status.ACTIVE)
+        return make_lease(**kwargs)
+
+    return _make
+
+
+@pytest.fixture
+def portal_tenant(auth_client, make_user, make_contact, make_lease_for):
+    """A rental tenant with an active lease and a working portal login."""
+    from apps.identity.models import User
+
+    pm = make_user("property_manager")
+    contact = make_contact()
+    lease = make_lease_for(tenant=contact)
+
+    response = auth_client(pm).post(
+        "/api/v1/portal-users/",
+        {
+            "contact_id": str(contact.id),
+            "portal_type": "TENANT",
+            "contract_ref_type": "LEASE",
+            "contract_ref_id": str(lease.id),
+            "password": "client-pass-55512",
+        },
+    )
+    assert response.status_code == 201, response.data
+    user = User.objects.get(email=contact.email)
+    return {"user": user, "contact": contact, "lease": lease, "inviter": pm}

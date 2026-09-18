@@ -6,7 +6,7 @@ which is `services.grantable_role_codes`, so the rule holds for a shell session 
 """
 from rest_framework.permissions import BasePermission
 
-from ..services import grantable_role_codes
+from ..services import grantable_role_codes, invitable_portal_types
 
 
 class PasswordIsCurrent(BasePermission):
@@ -51,3 +51,26 @@ class CanRegisterUsers(BasePermission):
         if request.method in ("GET", "HEAD", "OPTIONS"):
             return True
         return bool(grantable_role_codes(user))
+
+
+class CanInvitePortalUsers(BasePermission):
+    """May the requester invite portal clients at all?
+
+    Per the role definitions, the Sales/Leasing Agent invites buyers and sellers and the
+    Property Manager onboards tenants and landlords. *Which* type they may invite is decided
+    by `services.grant_portal_access`, which raises PermissionDenied — so this class does not
+    need the request body.
+
+    Reads are left open to authenticated users because the queryset already scopes them: a
+    portal client sees only their own profile.
+    """
+
+    message = "Your role does not permit inviting portal clients."
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return True
+        return bool(invitable_portal_types(user))

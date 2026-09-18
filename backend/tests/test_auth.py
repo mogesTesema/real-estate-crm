@@ -73,13 +73,19 @@ def test_me_reports_identity_roles_and_scopes(auth_client, agent):
 
 
 def test_me_reports_what_an_owner_may_grant(auth_client, owner):
+    """SRS 3.15.2 gives the owner exactly one role to register: the Sales/Leasing Agent."""
     body = auth_client(owner).get(ME_URL).data
-    assert body["grantable_role_codes"] == [
-        "agent",
-        "finance",
-        "marketing",
-        "property_manager",
-    ]
+    assert body["grantable_role_codes"] == ["agent"]
+
+
+def test_me_reports_the_full_set_for_a_super_admin(auth_client, super_admin):
+    body = auth_client(super_admin).get(ME_URL).data
+    assert set(body["grantable_role_codes"]) == {
+        "super_admin", "owner", "manager", "agent",
+        "property_manager", "marketing", "finance",
+    }
+    # Never `portal`: a client login is not a staff role grant.
+    assert "portal" not in body["grantable_role_codes"]
 
 
 def test_me_allows_editing_your_own_profile(auth_client, agent):

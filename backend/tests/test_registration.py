@@ -24,10 +24,15 @@ STAFF_ROLES = [
 ]
 
 #: actor role -> the roles they may create. Everything else must be refused.
+#:
+#: Straight from SRS 3.15.2: "Branch/Team Managers register Broker/Agency Owners;
+#: Broker/Agency Owners register Sales/Leasing Agents." Neither that clause nor the role
+#: definitions delegate property_manager, marketing or finance to anyone below Super Admin,
+#: whose 3.15.1 remit is company-wide user governance.
 ALLOWED = {
     "super_admin": set(STAFF_ROLES),
     "manager": {"owner"},
-    "owner": {"agent", "property_manager", "marketing", "finance"},
+    "owner": {"agent"},
     "agent": set(),
     "property_manager": set(),
     "marketing": set(),
