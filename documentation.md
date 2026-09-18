@@ -3,19 +3,113 @@
 Quick daily notes on what got done on the backend and where things stand. Frontend-only work
 is tracked in the frontend repo's own log and omitted here.
 
-**Current state:** the backend has been rebuilt against `architecture.md` **v3.3**, which
-restructures it into nine apps under a strict import DAG. The **schema is complete** (100
-tables, closing seven gaps the SRS had no column for) and **register and login work for all
-eight roles**, portal clients included — with password reset, logout, and the audit trail SRS
-5.3 requires. **Row scoping now covers every Phase-1 domain resource**, so the endpoints that
-follow have somewhere legal to read from. The other eight apps have models and scoping rules
-but no endpoints yet. The previous Phase-1 API is preserved at tag **`phase1-flat-layout`**.
+**Current state:** the backend is built against `architecture.md` v3.3 — nine apps under a
+strict import DAG, 100 tables, and **SRS Phase 1 is operational end to end**. You can register
+anyone, import a contact book, list a property with media, search it by radius, capture a lead
+that de-duplicates and routes and scores itself, answer it inside an SLA, convert it, drag the
+deal through a Kanban board, book a viewing that lands on the calendar, track a field visit by
+GPS, and watch all of it move a dashboard. `property_ops`, `finance` and most of
+`collaboration` are still models only — SRS Phases 2–4. The pre-rebuild API is preserved at
+tag **`phase1-flat-layout`**.
+
+Live endpoints: `/api/v1/` for `identity`, `contacts`, `inventory`, `crm` and `platform`;
+Swagger at `/api/docs/`.
 
 Bootstrap with `createsuperuser` (it now attaches the `super_admin` role), create a Company
 and Branch in Django admin, then register everyone else via `POST /api/v1/users/`.
 
 The demo logins below no longer exist: `seed_demo` was part of the old layout and was removed
 with it. A new seed command arrives with the API pass.
+
+---
+
+## Day 16: Fri, Sep 18, 2026; SRS Phase 1 — the operational CRM
+
+Six modules, end to end: `contacts`, `inventory`, the `crm` lead engine, the pipeline and its
+Kanban, viewings, GPS field tracking, and the dashboards that read all of it. 662 tests, up
+from 381. What follows is the reasoning worth keeping, not a feature list.
+
+**One way in.** `capture_lead` is the only path a lead can take into the system — web form,
+portal feed, walk-in, phone, manual entry, CSV. Every guarantee in SRS 3.1 hangs off it:
+de-duplication, scoring, routing, the SLA clock, the instant acknowledgment. A second create
+path would be a set of requirements that silently applies to some leads and not others. The
+order inside it is load-bearing too: the contact is resolved first because scoring reads their
+phone, the score is computed before routing because rules match on `min_score`, and the SLA
+clock starts only once the lead is with someone who could answer it.
+
+**Three bugs that came out of reading the old code rather than running it.**
+- Round-robin filtered users on `user_roles__role__code`, which joins the through-table — an
+  agent holding two roles appeared twice, doubling their counted load and permanently
+  protecting them from assignment. Resolving the candidate ids first, then annotating over a
+  plain `pk__in`, is the fix.
+- `merge_contacts` repointed `leads` and nothing else, silently orphaning every other child —
+  and would have gone on orphaning each relation added by each new module. It now walks
+  `Contact._meta.related_objects`, so a relation added in a later pass is carried
+  automatically. It also repoints `identity_record_share`, which points at a bare UUID with no
+  foreign key: left behind, the grant silently evaporates for whoever held it.
+- Moving a deal *out* of a lost stage left `lost_reason` set, so the deal read as open while
+  every report still showed why it was lost.
+
+**The tension in de-duplication, and how it resolves.** The check has to search the whole book
+— a scoped lookup hides the contact another agent already owns and creates the exact duplicate
+SRS 3.1.10/3.1.11 exist to prevent. But returning that contact would make
+`GET /contacts/duplicates/` a way to read any record in the company by guessing a phone number.
+So a match outside the caller's scope is reported as its *existence*, a masked name, and who to
+ask. That is the minimum disclosure that still stops duplicate outreach. The previous
+implementation had no scoping on this path at all.
+
+**Radius search is PostGIS now.** The old code computed a haversine distance in Python over
+every row, which cannot use an index and reads the whole table to answer "within 5km".
+`geo_point` is `geography(Point,4326)` with its GiST index already built. `distance_km` is also
+*returned* — the old serializer computed it and never exposed it, so a map view had no way to
+sort by nearest.
+
+**Mandatory means mandatory.** SRS 3.4.4 wants a reason on every deal stage move. It is refused
+at the service, refused at the serializer, and refused again by a CHECK constraint on
+`crm_deal_stage_history.reason`, so an import or a future endpoint cannot talk its way past it.
+The same shape applies to GPS: 3.16.5 refuses a session without GPS enabled, because a session
+that opens without it is an untracked visit wearing a tracked visit's name — worse than no
+session, since the record implies a trail that does not exist.
+
+**The half of a requirement that is easy to miss.** SRS 3.16.7 says GPS tracks are
+"role-restricted **and** audited". Row scoping is the restriction and was the obvious half;
+without the audit row a manager reads an employee's whole day and leaves no trace. Every
+*supervisory* read now writes a `platform_audit_event` with the number of points disclosed.
+Self-reads are not audited — the control exists to make supervisory access visible, and logging
+self-reads buries the ones that matter.
+
+**No role branching in the dashboard.** The figures are the same questions for everyone; the
+*scope* is what differs, and `apply_scope` already decides that from the caller's `data_scope`.
+An agent sees their own numbers and a manager the branch's, from one code path. Branching on
+role would put visibility rules in a second place, and the two would drift.
+
+**Things the tooling caught that review would not have.**
+- `UNIQUE(deal, property, unit)` did nothing for whole-property links, because `unit` is null
+  and Postgres treats nulls as distinct in a unique index. `NULLS NOT DISTINCT` is the fix.
+- `lint-imports` rejected `platform.selectors` because it transitively reached
+  `contacts.services` — `contacts.selectors` imported the normalisers from the write API. The
+  normalisers are pure functions and now live in `contacts.normalization`. A read module
+  importing the write API was a smell before it was a contract violation.
+- drf-spectacular flagged two identical `AgentSummarySerializer` copies colliding into one
+  component, and a `status` enum whose generated name would churn on every regeneration. Both
+  are now named once, in `core.serializers` and `ENUM_NAME_OVERRIDES`.
+- `?format=csv` 404s: DRF reserves `format` for content negotiation. The parameter is `export`.
+
+**No Celery.** Render's free tier blocks background workers, so the SLA sweep is a management
+command an external scheduler calls (`python manage.py sweep_sla`, idempotent), and the lead
+acknowledgment sends inline. A queued acknowledgment that never runs is worse than a
+synchronous one costing a few hundred milliseconds.
+
+**DoD**
+- 662 tests (was 381). 15/15 import contracts kept, including three new cross-app edges:
+  `crm → contacts`, `crm → collaboration`, `platform → domain selectors`.
+- Zero OpenAPI warnings, no migration drift, ruff clean.
+- Walked the whole flow against a running server: register owner → owner registers agent → CSV
+  import → property with media → publish → radius search → routing rule → capture (de-duplicated
+  onto an imported contact, scored, routed, SLA started) → duplicate flagged not refused →
+  respond → qualify → convert (twice, idempotent) → Kanban move refused without a reason and
+  accepted with one → viewing on the calendar → GPS session refused without GPS, trail appended,
+  supervisory read audited → dashboards and reports move. All green.
 
 ---
 
