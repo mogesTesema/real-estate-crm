@@ -155,3 +155,55 @@ class PublicLandingPageSubmitView(PublicBase):
             # echoing them helps the human without teaching a bot anything new.
             return Response(payload, status=status.HTTP_400_BAD_REQUEST)
         return Response(ACCEPTED, status=status.HTTP_202_ACCEPTED)
+
+
+class PublicChatQualifyView(PublicBase):
+    """`POST /public/chat/qualify/` — stateless scripted qualification (SRS 3.20.4).
+
+    The client round-trips `state`; when the script completes, the collected slots run
+    the normal capture pipeline. Honeypot + throttle, same doctrine as the inquiry door.
+    """
+
+    throttle_scope = "public_chat"
+
+    @extend_schema(auth=[], request=dict, responses={200: dict})
+    def post(self, request):
+        from ..ai import get_provider
+
+        data = request.data or {}
+        if data.get("website"):  # honeypot
+            return Response({"done": True, "reply": "Thank you!", "state": {}})
+        result = get_provider().qualify_chat(
+            state=data.get("state"), message=data.get("message", "")
+        )
+        if result.get("done") and not result["state"].get("_captured"):
+            state = result["state"]
+            name = (state.get("name") or "").strip()
+            first = name.split(" ")[0] if name else "Chat"
+            last = " ".join(name.split(" ")[1:]) if " " in name else "Visitor"
+            source, _ = LeadSource.objects.get_or_create(
+                name="Website chat", defaults={"source_type": "WEBSITE"}
+            )
+            lead_type = (
+                Lead.LeadType.RENT_IN
+                if "rent" in (state.get("intent") or "").lower()
+                else Lead.LeadType.BUY
+            )
+            try:
+                services.capture_lead(
+                    actor=None,
+                    contact_data={
+                        "contact_type": "PERSON", "first_name": first,
+                        "last_name": last, "email": state.get("email") or None,
+                    },
+                    lead_type=lead_type,
+                    source=source,
+                    description=(
+                        f"Chat-qualified. Budget: {state.get('budget')}; "
+                        f"area: {state.get('location')}."
+                    ),
+                )
+                result["state"] = {**state, "_captured": True}
+            except DjangoValidationError:
+                logger.warning("chat qualify capture failed", exc_info=True)
+        return Response(result)

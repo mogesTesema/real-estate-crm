@@ -7,7 +7,7 @@ from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
 from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import OpenApiParameter, extend_schema
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import (
@@ -1340,3 +1340,52 @@ class SavedSearchAlertViewSet(
         except Exception as exc:  # noqa: BLE001
             _translate(exc)
         return Response(SavedSearchAlertSerializer(alert).data)
+
+
+# --- AI assistance (SRS §3.20) --------------------------------------------------------------
+
+
+class LeadAiInsightsView(APIView):
+    """`GET /leads/{id}/ai-insights/` — score rationale + next best action, from the
+    configured provider (deterministic rules by default; Claude documented)."""
+
+    @extend_schema(responses={200: OpenApiResponse(description="Insights")})
+    def get(self, request, pk):
+        from ..ai import get_provider
+
+        lead = get_object_or_404(
+            selectors.visible_leads(request.user).select_related("contact", "source"),
+            pk=pk,
+        )
+        provider = get_provider()
+        return Response(
+            {
+                "scoring": provider.score_lead(lead),
+                "next_best_action": provider.next_best_action(lead),
+            }
+        )
+
+
+class AiDraftView(APIView):
+    """`POST /ai/draft/` — draft an outbound message for a lead. Staff resolve the lead
+    through their own scope; the draft is a suggestion, sending stays a human act."""
+
+    @extend_schema(request=None, responses={200: OpenApiResponse(description="Draft")})
+    def post(self, request):
+        from ..ai import get_provider
+
+        lead = get_object_or_404(
+            selectors.visible_leads(request.user).select_related("contact"),
+            pk=request.data.get("lead"),
+        )
+        property_title = None
+        if lead.target_property_id:
+            property_title = lead.target_property.title
+        draft = get_provider().draft_message(
+            channel=request.data.get("channel", "EMAIL"),
+            intent=request.data.get("intent", "follow_up"),
+            contact=lead.contact,
+            agent=request.user,
+            property_title=property_title,
+        )
+        return Response(draft)

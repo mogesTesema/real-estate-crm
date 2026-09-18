@@ -196,6 +196,8 @@ REST_FRAMEWORK = {
         "public_listings": env("PUBLIC_LISTINGS_THROTTLE_RATE", "60/min"),
         "public_inquiry": env("PUBLIC_INQUIRY_THROTTLE_RATE", "5/min"),
         "public_page": env("PUBLIC_PAGE_THROTTLE_RATE", "30/min"),
+        "webhook_inbound": env("WEBHOOK_INBOUND_THROTTLE_RATE", "120/min"),
+        "public_chat": env("PUBLIC_CHAT_THROTTLE_RATE", "20/min"),
     },
 }
 
@@ -324,6 +326,16 @@ FILE_UPLOAD_MAX_BYTES = int(env("FILE_UPLOAD_MAX_BYTES", str(25 * 1024 * 1024)))
 # origin; set an absolute template (https://app.example.com/sign/{token}) in production.
 ESIGN_PUBLIC_URL_TEMPLATE = env("ESIGN_PUBLIC_URL_TEMPLATE", "/public/esign/{token}/")
 ESIGN_TOKEN_MAX_AGE_DAYS = int(env("ESIGN_TOKEN_MAX_AGE_DAYS", "30"))
+
+# Outbound webhook delivery: "mock" (importable outbox, mail.outbox ergonomics) or
+# "urllib" (stdlib POST, 5s timeout). `requests` with retries is the documented
+# production hardening (third-part-needed.md).
+# AI assistance (SRS 3.20): "mock" = the deterministic rule-based provider in
+# apps/crm/ai.py. A Claude API provider is documented in third-part-needed.md §17;
+# point AI_PROVIDER_CLASS at it once the anthropic SDK and key are in place.
+AI_PROVIDER = env("AI_PROVIDER", "mock")
+
+WEBHOOK_TRANSPORT = env("WEBHOOK_TRANSPORT", "urllib")
 
 COLLABORATION_GATEWAYS = {
     "EMAIL": env("GATEWAY_EMAIL", "apps.collaboration.gateways.DjangoEmailGateway"),

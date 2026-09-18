@@ -2,6 +2,7 @@
 from django.urls import path
 
 from .public import (
+    PublicChatQualifyView,
     PublicInquiryView,
     PublicLandingPageSubmitView,
     PublicLandingPageView,
@@ -9,6 +10,7 @@ from .public import (
 
 urlpatterns = [
     path("inquiries/", PublicInquiryView.as_view(), name="public-inquiry"),
+    path("chat/qualify/", PublicChatQualifyView.as_view(), name="public-chat-qualify"),
     path("pages/<slug:slug>/", PublicLandingPageView.as_view(), name="public-page"),
     path(
         "pages/<slug:slug>/submit/",

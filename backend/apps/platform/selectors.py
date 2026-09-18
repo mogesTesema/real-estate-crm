@@ -42,16 +42,78 @@ def dashboard(user, *, days=DEFAULT_WINDOW_DAYS):
     agent sees their own numbers and a manager the branch's, from one code path. Branching on
     role would be a second place for visibility rules to live, and the two would drift.
     """
+    return _kpis(
+        leads=crm_selectors.visible_leads(user),
+        deals=crm_selectors.visible_deals(user),
+        properties=inventory_selectors.visible_properties(user),
+        listings=inventory_selectors.visible_listings(user),
+        contacts=contacts_selectors.visible_contacts(user),
+        days=days,
+    )
+
+
+#: How a snapshot scope narrows each domain queryset. Mirrors the BRANCH/TEAM arms of the
+#: scoping registry (leads: assigned agent OR team; deals: owner; properties: manager;
+#: listings and contacts: assigned agent) so a snapshot for a branch answers the same
+#: question a BRANCH-scoped manager's live dashboard does.
+_SCOPE_FILTERS = {
+    "BRANCH": {
+        "leads": lambda sid: Q(assigned_agent__branch_id=sid) | Q(assigned_team__branch_id=sid),
+        "deals": lambda sid: Q(owner__branch_id=sid),
+        "properties": lambda sid: Q(managed_by__branch_id=sid),
+        "listings": lambda sid: Q(assigned_agent__branch_id=sid)
+        | Q(co_listing_agent__branch_id=sid),
+        "contacts": lambda sid: Q(assigned_agent__branch_id=sid),
+    },
+    "TEAM": {
+        "leads": lambda sid: Q(assigned_agent__team_id=sid) | Q(assigned_team_id=sid),
+        "deals": lambda sid: Q(owner__team_id=sid),
+        "properties": lambda sid: Q(managed_by__team_id=sid),
+        "listings": lambda sid: Q(assigned_agent__team_id=sid)
+        | Q(co_listing_agent__team_id=sid),
+        "contacts": lambda sid: Q(assigned_agent__team_id=sid),
+    },
+}
+
+
+def dashboard_for_scope(scope_type, scope_id=None, *, days=DEFAULT_WINDOW_DAYS):
+    """The same KPI dict, computed for an organizational scope instead of a caller — the
+    snapshot builder's entry point. ORG takes everything; BRANCH/TEAM narrow per
+    `_SCOPE_FILTERS`."""
+    from apps.contacts.selectors import live_contacts
+    from apps.crm.selectors import live_deals, live_leads
+    from apps.inventory.selectors import live_listings, live_properties
+
+    querysets = {
+        "leads": live_leads(),
+        "deals": live_deals(),
+        "properties": live_properties(),
+        "listings": live_listings(),
+        "contacts": live_contacts(),
+    }
+    if scope_type != "ORG":
+        filters = _SCOPE_FILTERS.get(scope_type)
+        if filters is None:
+            raise KeyError(f"No snapshot rule for scope {scope_type!r}")
+        querysets = {
+            name: qs.filter(filters[name](scope_id)) for name, qs in querysets.items()
+        }
+    return _kpis(days=days, **querysets)
+
+
+def _kpis(*, leads, deals, properties, listings, contacts, days):
+    """The KPI arithmetic, over whatever querysets the caller scoped. One implementation
+    serves the live dashboard and the snapshot builder, so the two cannot drift."""
     since = _window(days)
 
-    leads = crm_selectors.visible_leads(user)
     recent_leads = leads.filter(created_at__gte=since)
-    deals = crm_selectors.visible_deals(user)
     open_deals = deals.filter(status=Deal.Status.OPEN)
     won_deals = deals.filter(status=Deal.Status.WON, actual_close_date__gte=since.date())
 
     captured = recent_leads.count()
     converted = recent_leads.filter(status=Lead.Status.CONVERTED).count()
+
+    funnel_rows = leads.values("status").annotate(count=Count("id"))
 
     return {
         "window_days": days or DEFAULT_WINDOW_DAYS,
@@ -64,7 +126,9 @@ def dashboard(user, *, days=DEFAULT_WINDOW_DAYS):
             "open": leads.exclude(
                 status__in=(Lead.Status.CONVERTED, Lead.Status.LOST)
             ).count(),
-            "overdue": crm_selectors.overdue_leads(user).count(),
+            "overdue": leads.filter(
+                sla_breached=True, first_response_at__isnull=True
+            ).count(),
             "unassigned": leads.filter(
                 assigned_agent__isnull=True, assigned_team__isnull=True
             ).exclude(status__in=(Lead.Status.CONVERTED, Lead.Status.LOST)).count(),
@@ -85,22 +149,83 @@ def dashboard(user, *, days=DEFAULT_WINDOW_DAYS):
             "breached": recent_leads.filter(sla_breached=True).count(),
         },
         "inventory": {
-            "properties": inventory_selectors.visible_properties(user).count(),
-            "available": inventory_selectors.visible_properties(user)
-            .filter(status=Property.Status.AVAILABLE)
-            .count(),
-            "live_listings": inventory_selectors.visible_listings(user)
-            .filter(status__in=Listing.LIVE_STATUSES)
-            .count(),
+            "properties": properties.count(),
+            "available": properties.filter(status=Property.Status.AVAILABLE).count(),
+            "live_listings": listings.filter(status__in=Listing.LIVE_STATUSES).count(),
         },
         "contacts": {
-            "total": contacts_selectors.visible_contacts(user).count(),
-            "added": contacts_selectors.visible_contacts(user)
-            .filter(created_at__gte=since)
-            .count(),
+            "total": contacts.count(),
+            "added": contacts.filter(created_at__gte=since).count(),
         },
-        "funnel": crm_selectors.lead_funnel(user),
+        "funnel": {row["status"]: row["count"] for row in funnel_rows},
     }
+
+
+def build_dashboard_snapshots(as_of=None):
+    """Upsert a KPI_DAILY snapshot for the org, every branch and every team (SRS 3.13.1).
+    The NULLS-NOT-DISTINCT unique constraint IS the idempotency — a re-run replaces the
+    day's data instead of duplicating it."""
+    from apps.identity.models import Branch, Team
+
+    from .models import DashboardSnapshot
+
+    as_of = as_of or timezone.localdate()
+    targets = [("ORG", None)]
+    targets += [("BRANCH", branch.pk) for branch in Branch.objects.all()]
+    targets += [("TEAM", team.pk) for team in Team.objects.all()]
+
+    written = []
+    for scope_type, scope_id in targets:
+        data = dashboard_for_scope(scope_type, scope_id)
+        snapshot, _ = DashboardSnapshot.objects.update_or_create(
+            snapshot_type=DashboardSnapshot.SnapshotType.KPI_DAILY,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            as_of_date=as_of,
+            defaults={"data": _jsonable(data)},
+        )
+        written.append(snapshot)
+    return written
+
+
+def _jsonable(value):
+    """Decimals → strings so the snapshot JSON round-trips losslessly."""
+    from decimal import Decimal
+
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, Decimal):
+        return str(value)
+    return value
+
+
+def snapshot_for(user, *, as_of, scope_type="ORG", scope_id=None):
+    """Read a stored snapshot, gated by what the caller could see live: ALL reads any;
+    BRANCH reads its own branch and the org; TEAM reads its own team and the org. Returns
+    None when no snapshot exists for that day."""
+    from apps.identity.models import Role
+    from apps.identity.scoping import scopes_for
+
+    from .models import DashboardSnapshot
+
+    scopes = scopes_for(user)
+    allowed = Role.DataScope.ALL in scopes or user.is_superuser
+    if not allowed and scope_type == "ORG":
+        allowed = bool(scopes & {Role.DataScope.BRANCH, Role.DataScope.TEAM})
+    if not allowed and scope_type == "BRANCH":
+        allowed = Role.DataScope.BRANCH in scopes and str(user.branch_id) == str(scope_id)
+    if not allowed and scope_type == "TEAM":
+        allowed = (
+            Role.DataScope.TEAM in scopes or Role.DataScope.BRANCH in scopes
+        ) and str(user.team_id) == str(scope_id)
+    if not allowed:
+        return None
+    return DashboardSnapshot.objects.filter(
+        snapshot_type=DashboardSnapshot.SnapshotType.KPI_DAILY,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        as_of_date=as_of,
+    ).first()
 
 
 def average_response_minutes(leads):

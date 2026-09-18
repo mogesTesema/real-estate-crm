@@ -13,5 +13,7 @@ class PlatformConfig(AppConfig):
         (architecture.md §1.2), so the dependency is inverted and this app registers with it.
         """
         from . import receivers
+        from .scoping import register_resources
 
         receivers.connect()
+        register_resources()

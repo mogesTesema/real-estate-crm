@@ -42,6 +42,8 @@ REST_FRAMEWORK = {  # noqa: F405
         "public_listings": None,
         "public_inquiry": None,
         "public_page": None,
+        "webhook_inbound": None,
+        "public_chat": None,
     },
 }
 
@@ -54,3 +56,6 @@ STORAGES = {
     "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
 }
 MEDIA_ROOT = "/tmp/crm-test-media"
+
+# Webhooks land in apps.platform.webhooks.outbox instead of the network.
+WEBHOOK_TRANSPORT = "mock"

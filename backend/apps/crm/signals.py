@@ -31,3 +31,9 @@ offer_accepted = Signal()
 #: SRS 3.6.6 — transaction lifecycle for audit + webhook fan-out.
 #: kwargs: transaction_obj, actor, from_status, to_status
 transaction_status_changed = Signal()
+
+#: Request/response (the `verify_portal_eligibility` precedent): `platform` receives an
+#: external lead and asks `crm` to capture it — platform may not import crm.services, so
+#: the dependency inverts through this signal. The receiver returns the created lead's id.
+#: kwargs: payload (dict with contact_data + lead fields), connection_name
+inbound_lead_received = Signal()

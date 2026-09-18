@@ -67,3 +67,14 @@ def record_event(
             entity_id,
         )
         return None
+
+
+def emit_webhook_event(event_type, payload):
+    """Public seam for other apps to fan an event out to subscribed webhooks (SRS 3.19.2).
+
+    `collaboration` calls this for `document.signed`; domain events arrive via signals →
+    receivers instead. Never raises — same doctrine as `record_event`.
+    """
+    from .webhooks import dispatch_webhooks
+
+    return dispatch_webhooks(event_type, payload)

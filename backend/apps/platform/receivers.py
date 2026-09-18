@@ -218,6 +218,10 @@ def on_listing_status_changed(sender, *, listing, actor, from_status, to_status,
         old_values={"status": from_status},
         new_values={"status": to_status, "reference_code": listing.reference_code},
     )
+    _webhooks(
+        "listing.status_changed",
+        {"listing_id": str(listing.pk), "from": from_status, "to": to_status},
+    )
 
 
 # --- crm (SRS 3.1, 3.4, 3.16.7) ------------------------------------------------------------
@@ -234,6 +238,15 @@ def on_lead_captured(sender, *, lead, actor, assigned_to, rule=None, **kwargs):
             "assigned_to": str(assigned_to.pk) if assigned_to else None,
             "routing_rule": rule.name if rule else None,
             "possible_duplicate": lead.is_possible_duplicate,
+        },
+    )
+    _webhooks(
+        "lead.captured",
+        {
+            "lead_id": str(lead.pk),
+            "lead_type": lead.lead_type,
+            "score": lead.score,
+            "assigned_to": str(assigned_to.pk) if assigned_to else None,
         },
     )
 
@@ -260,6 +273,11 @@ def on_lead_converted(sender, *, lead, actor, deal, **kwargs):
         entity_id=lead.pk,
         actor=actor,
         new_values={"converted_to_deal": deal.reference_code, "deal_id": str(deal.pk)},
+    )
+    _webhooks(
+        "lead.converted",
+        {"lead_id": str(lead.pk), "deal_id": str(deal.pk),
+         "deal_reference": deal.reference_code},
     )
 
 
@@ -458,6 +476,11 @@ def on_deal_stage_moved(sender, *, deal, actor, from_stage, to_stage, reason, **
         old_values={"stage": from_stage.name},
         new_values={"stage": to_stage.name, "reason": reason, "status": deal.status},
     )
+    _webhooks(
+        "deal.stage_moved",
+        {"deal_id": str(deal.pk), "from": from_stage.code, "to": to_stage.code,
+         "status": deal.status},
+    )
 
 
 def on_offer_accepted(sender, *, offer, actor, **kwargs):
@@ -471,6 +494,11 @@ def on_offer_accepted(sender, *, offer, actor, **kwargs):
             "accepted_amount": str(offer.amount),
             "direction": offer.direction,
         },
+    )
+    _webhooks(
+        "offer.accepted",
+        {"offer_id": str(offer.pk), "deal_id": str(offer.deal_id),
+         "amount": str(offer.amount)},
     )
 
 
@@ -488,6 +516,20 @@ def on_transaction_status_changed(
             "transaction": transaction_obj.reference_code,
         },
     )
+    _webhooks(
+        "transaction.status_changed",
+        {"transaction_id": str(transaction_obj.pk),
+         "reference": transaction_obj.reference_code,
+         "from": from_status, "to": to_status},
+    )
+
+
+def _webhooks(event_type, payload):
+    """Fan the event out to subscribed outbound webhooks. Late import (fan-out is optional
+    machinery) and never raises — a webhook must not break a domain write."""
+    from .webhooks import dispatch_webhooks
+
+    dispatch_webhooks(event_type, payload)
 
 
 _WIRING = (

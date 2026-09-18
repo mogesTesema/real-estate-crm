@@ -108,7 +108,41 @@ def _contact_on_deal(transaction, contact_id):
 
 
 def connect():
+    from . import signals as crm_signals
+
     verify_portal_eligibility.connect(
         verify_transaction_eligibility,
         dispatch_uid="crm.verify_transaction_eligibility",
     )
+    crm_signals.inbound_lead_received.connect(
+        capture_inbound_lead, dispatch_uid="crm.capture_inbound_lead"
+    )
+
+
+def capture_inbound_lead(sender, *, payload, connection_name=None, **kwargs):
+    """`platform` hands an external lead over the `inbound_lead_received` signal (it may
+    not import `crm.services`); this receiver runs the one capture pipeline and answers
+    with the lead id. A malformed payload returns None — the sync log records the failure,
+    the rest of the batch continues."""
+    from django.core.exceptions import ValidationError as DjangoValidationError
+
+    from . import services
+    from .models import LeadSource
+
+    try:
+        contact_data = payload.get("contact_data") or {}
+        source_name = payload.get("source") or connection_name or "Portal"
+        source, _ = LeadSource.objects.get_or_create(
+            name=source_name, defaults={"source_type": "PROPERTY_PORTAL"}
+        )
+        lead = services.capture_lead(
+            actor=None,
+            contact_data=contact_data,
+            lead_type=payload.get("lead_type") or "BUY",
+            source=source,
+            description=payload.get("message") or None,
+        )
+        return str(lead.pk)
+    except (DjangoValidationError, TypeError, KeyError) as exc:
+        logger.warning("Inbound lead refused: %s", exc)
+        return None

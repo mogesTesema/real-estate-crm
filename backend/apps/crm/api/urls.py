@@ -6,12 +6,14 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    AiDraftView,
     CampaignViewSet,
     ClosingChecklistViewSet,
     DealPropertyViewSet,
     DealViewSet,
     FieldSessionViewSet,
     LandingPageViewSet,
+    LeadAiInsightsView,
     LeadMatchesView,
     LeadSourceViewSet,
     LeadViewSet,
@@ -42,6 +44,12 @@ router.register("saved-search-alerts", SavedSearchAlertViewSet, basename="saved-
 
 urlpatterns = [
     path("leads/<uuid:pk>/matches/", LeadMatchesView.as_view(), name="lead-matches"),
+    path(
+        "leads/<uuid:pk>/ai-insights/",
+        LeadAiInsightsView.as_view(),
+        name="lead-ai-insights",
+    ),
+    path("ai/draft/", AiDraftView.as_view(), name="ai-draft"),
     path(
         "listings/<uuid:pk>/matching-leads/",
         ListingMatchingLeadsView.as_view(),

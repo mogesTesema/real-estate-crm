@@ -225,6 +225,16 @@ def sign(signer, *, typed_name, consent, ip=None, user_agent=None):
         _event(envelope, SignatureEvent.EventType.COMPLETED,
                metadata={"document_sha256": doc_hash})
         _notify_creator(envelope, "completed")
+        from apps.platform.services import emit_webhook_event
+
+        emit_webhook_event(
+            "document.signed",
+            {
+                "envelope_id": str(envelope.pk),
+                "document_id": str(envelope.document_id),
+                "document_sha256": doc_hash,
+            },
+        )
     else:
         if envelope.status == EsignEnvelope.Status.SENT:
             envelope.status = EsignEnvelope.Status.PARTIALLY_SIGNED

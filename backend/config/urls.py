@@ -39,6 +39,7 @@ api_v1 = [
 api_public = [
     path("", include("apps.inventory.api.public_urls")),
     path("", include("apps.crm.api.public_urls")),
+    path("", include("apps.platform.api.public_urls")),
 ]
 
 urlpatterns = [
