@@ -11,6 +11,8 @@ Every function takes an `actor` — the user performing the action — and raise
 `PermissionDenied` rather than silently narrowing what it does. Authorisation lives here, not
 in the serializers, so it holds for a management command or a shell session too.
 """
+import logging
+
 from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
@@ -22,6 +24,8 @@ from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 
 from . import signals
 from .models import PortalProfile, Role, Team, User, UserRole
+
+logger = logging.getLogger(__name__)
 
 # --- Registration authority ---------------------------------------------------------------
 #
@@ -219,7 +223,7 @@ def register_user(
 
     UserRole.objects.create(user=user, role=role)
 
-    signals.user_registered.send(sender=None, user=user, actor=actor, role_code=role_code)
+    signals.user_registered.send_robust(sender=None, user=user, actor=actor, role_code=role_code)
     return user
 
 
@@ -250,7 +254,7 @@ def assign_role(*, actor, user: User, role_code: str) -> UserRole:
 
     user_role, created = UserRole.objects.get_or_create(user=user, role=role)
     if created:
-        signals.role_assigned.send(
+        signals.role_assigned.send_robust(
             sender=None, user=user, actor=actor, role_code=role_code
         )
     return user_role
@@ -265,7 +269,7 @@ def revoke_role(*, actor, user: User, role_code: str) -> None:
         _assert_not_last_super_admin(user, "revoke the last super_admin role")
     removed, _ = UserRole.objects.filter(user=user, role__code=role_code).delete()
     if removed:
-        signals.role_revoked.send(sender=None, user=user, actor=actor, role_code=role_code)
+        signals.role_revoked.send_robust(sender=None, user=user, actor=actor, role_code=role_code)
 
 
 def _is_administrator(user: User) -> bool:
@@ -321,7 +325,7 @@ def deactivate_user(*, actor, user: User) -> None:
     if user.is_active:
         user.is_active = False
         user.save(update_fields=["is_active", "updated_at"])
-        signals.user_deactivated.send(sender=None, user=user, actor=actor)
+        signals.user_deactivated.send_robust(sender=None, user=user, actor=actor)
 
 
 @transaction.atomic
@@ -341,7 +345,7 @@ def reactivate_user(*, actor, user: User) -> None:
     if not user.is_active:
         user.is_active = True
         user.save(update_fields=["is_active", "updated_at"])
-        signals.user_reactivated.send(sender=None, user=user, actor=actor)
+        signals.user_reactivated.send_robust(sender=None, user=user, actor=actor)
 
 
 # --- Portal access -------------------------------------------------------------------------
@@ -376,14 +380,23 @@ def _confirm_eligibility(*, contact_id, portal_type, ref_type, ref_id) -> dict:
     exist, a contract in the wrong state, and a contact unconnected to it are indistinguishable
     from here, and all of them mean "no".
     """
-    responses = signals.verify_portal_eligibility.send(
+    # send_robust, not send: a verifier that crashes must not 500 the request. It simply
+    # fails to vouch, and the refusal below applies — which is the fail-closed direction.
+    responses = signals.verify_portal_eligibility.send_robust(
         sender=None,
         contact_id=contact_id,
         portal_type=portal_type,
         contract_ref_type=ref_type,
         contract_ref_id=ref_id,
     )
-    for _receiver, response in responses:
+    for receiver, response in responses:
+        if isinstance(response, Exception):
+            logger.exception(
+                "Portal eligibility verifier %r failed; treating as a refusal.",
+                receiver,
+                exc_info=response,
+            )
+            continue
         if response and response.get("eligible"):
             return response
 
@@ -468,7 +481,7 @@ def grant_portal_access(
         is_verified=True,
     )
 
-    signals.portal_access_granted.send(
+    signals.portal_access_granted.send_robust(
         sender=None, user=user, actor=actor, portal_profile=profile
     )
     return user
@@ -480,14 +493,21 @@ def revoke_portal_access(*, actor, portal_profile, reason: str = "") -> None:
 
     Suspends rather than deletes: `last_access_at` and the contract reference are history, and
     SRS 5.3 wants that history to survive. Reinstating is then a status change, not a rebuild.
+
+    Revoking is gated on the *same* portal type as granting. Checking only "may this actor
+    invite anybody" would let an agent — whose remit is buyers and sellers — cut off a rental
+    tenant's access, which is the property manager's client, not theirs.
     """
-    if not invitable_portal_types(actor):
-        raise PermissionDenied("Your role does not permit revoking portal access.")
+    if portal_profile.portal_type not in invitable_portal_types(actor):
+        raise PermissionDenied(
+            f"Your role does not permit revoking '{portal_profile.portal_type}' "
+            "portal access."
+        )
 
     portal_profile.eligibility_status = PortalProfile.EligibilityStatus.SUSPENDED
     portal_profile.save(update_fields=["eligibility_status"])
 
-    signals.portal_access_revoked.send(
+    signals.portal_access_revoked.send_robust(
         sender=None,
         user=portal_profile.user,
         actor=actor,
@@ -528,7 +548,7 @@ def change_password(*, user: User, current_password: str, new_password: str) -> 
     user.set_password(new_password)
     user.must_change_password = False
     user.save(update_fields=["password", "must_change_password", "updated_at"])
-    signals.password_changed.send(sender=None, user=user, actor=user)
+    signals.password_changed.send_robust(sender=None, user=user, actor=user)
 
 
 def team_for(team_id):
@@ -600,5 +620,5 @@ def reset_password(*, uid: str, token: str, new_password: str) -> User:
     user.must_change_password = False
     user.save(update_fields=["password", "must_change_password", "updated_at"])
 
-    signals.password_changed.send(sender=None, user=user, actor=None)
+    signals.password_changed.send_robust(sender=None, user=user, actor=None)
     return user

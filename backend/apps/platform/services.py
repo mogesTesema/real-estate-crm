@@ -11,6 +11,8 @@ emits signals that `apps/platform/receivers.py` turns into calls to this functio
 """
 import logging
 
+from django.db import transaction
+
 from .models import AuditEvent
 
 logger = logging.getLogger(__name__)
@@ -35,18 +37,28 @@ def record_event(
     **Never raises.** An audit failure must not roll back the business action that triggered
     it — refusing a login because its audit row would not write is worse than the missing
     row. The failure is logged at ERROR so it is still visible, and returns None.
+
+    The write is wrapped in its own `transaction.atomic()` **savepoint**, and that is
+    load-bearing rather than decorative. Callers such as `identity.services.register_user`
+    are themselves atomic; catching a database error inside their transaction without a
+    savepoint would leave Postgres in an aborted state, so the caller's own COMMIT would fail
+    with "current transaction is aborted" — turning a swallowed audit failure into a failed
+    registration, which is exactly the outcome this function exists to prevent.
     """
     try:
-        return AuditEvent.objects.create(
-            action=action,
-            entity_type=entity_type,
-            entity_id=entity_id,
-            actor_user=actor if (actor is not None and actor.is_authenticated) else None,
-            old_values=old_values,
-            new_values=new_values,
-            ip_address=ip_address,
-            user_agent=user_agent,
-        )
+        with transaction.atomic():
+            return AuditEvent.objects.create(
+                action=action,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                actor_user=(
+                    actor if (actor is not None and actor.is_authenticated) else None
+                ),
+                old_values=old_values,
+                new_values=new_values,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
     except Exception:  # noqa: BLE001 - deliberately broad; see the docstring
         logger.exception(
             "Failed to record audit event action=%s entity=%s/%s",

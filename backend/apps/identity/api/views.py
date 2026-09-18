@@ -333,9 +333,17 @@ class UserViewSet(
 
         Both run the same authority check as registration, so this cannot be used to escalate
         around it.
+
+        On DELETE, `role_code` may come from the body **or** the query string. A body on a
+        DELETE is legal but awkward — some HTTP clients and intermediaries drop it silently —
+        so `?role_code=finance` is offered as the more portable form.
         """
         user = self.get_object()
-        serializer = AssignRoleSerializer(data=request.data)
+        data = request.data if request.data else {}
+        if request.method == "DELETE" and not data.get("role_code"):
+            data = {"role_code": request.query_params.get("role_code", "")}
+
+        serializer = AssignRoleSerializer(data=data)
         serializer.is_valid(raise_exception=True)
         role_code = serializer.validated_data["role_code"]
 
@@ -374,15 +382,21 @@ class PortalUserViewSet(
         qs = PortalProfile.objects.select_related("user").filter(
             user__deleted_at__isnull=True
         )
-        # A portal client may see only their own profile; staff see the clients they may
-        # invite. SRS 3.11.6: no portal user may view another client's data.
+        # SRS 3.11.6: no portal user may view another client's data. And staff see only the
+        # client types they are responsible for — an agent's remit is buyers and sellers, so
+        # a branch's rental tenants are not theirs to browse.
         user = getattr(self.request, "user", None)
         if user is None or not user.is_authenticated:
             # Only reachable during schema generation — the permission classes stop real
             # anonymous requests. AnonymousUser has no pk, so filtering on it would raise.
             return qs.none()
-        if user.is_superuser or services.invitable_portal_types(user):
+        if user.is_superuser:
             return qs
+
+        invitable = services.invitable_portal_types(user)
+        if invitable:
+            return qs.filter(portal_type__in=invitable)
+        # Not staff: a client sees themselves and nobody else.
         return qs.filter(user=user)
 
     def get_serializer_class(self):

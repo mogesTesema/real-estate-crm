@@ -539,3 +539,125 @@ def test_owning_a_property_does_not_make_you_its_buyer(
         portal_type="BUYER",
     )
     assert response.status_code == 400
+
+
+class TestRevokeAuthority:
+    """Revoking is gated on the same portal type as granting.
+
+    Checking only "may this actor invite anybody" let an agent — whose remit is buyers and
+    sellers — cut off a rental tenant, who is the property manager's client.
+    """
+
+    def test_an_agent_cannot_revoke_a_tenants_access(
+        self, auth_client, make_user, portal_tenant
+    ):
+        agent = make_user("agent")
+        profile = portal_tenant["user"].portal_profile
+
+        response = auth_client(agent).delete(f"{PORTAL_URL}{profile.id}/")
+
+        assert response.status_code in (403, 404)
+        profile.refresh_from_db()
+        assert profile.eligibility_status == PortalProfile.EligibilityStatus.ACTIVE
+
+    def test_the_property_manager_can(self, auth_client, portal_tenant):
+        profile = portal_tenant["user"].portal_profile
+        response = auth_client(portal_tenant["inviter"]).delete(
+            f"{PORTAL_URL}{profile.id}/"
+        )
+        assert response.status_code == 204
+
+    def test_a_super_admin_can_revoke_any_type(
+        self, auth_client, super_admin, portal_tenant
+    ):
+        profile = portal_tenant["user"].portal_profile
+        assert (
+            auth_client(super_admin).delete(f"{PORTAL_URL}{profile.id}/").status_code
+            == 204
+        )
+
+
+class TestStaffSeeOnlyTheirClientTypes:
+    def test_an_agent_does_not_see_rental_tenants(
+        self, auth_client, make_user, portal_tenant
+    ):
+        agent = make_user("agent")
+        response = auth_client(agent).get(PORTAL_URL)
+
+        assert response.status_code == 200
+        assert str(portal_tenant["user"].portal_profile.id) not in {
+            row["id"] for row in response.data["results"]
+        }
+
+    def test_the_property_manager_does(self, auth_client, portal_tenant):
+        response = auth_client(portal_tenant["inviter"]).get(PORTAL_URL)
+        assert str(portal_tenant["user"].portal_profile.id) in {
+            row["id"] for row in response.data["results"]
+        }
+
+
+def test_a_broken_verifier_refuses_rather_than_erroring(
+    auth_client, make_user, make_contact, make_lease_for
+):
+    """A receiver that raises must not 500 the request. It simply fails to vouch, and the
+    refusal applies — the fail-closed direction."""
+    from apps.identity import signals
+    from apps.property_ops import receivers
+
+    def exploding_verifier(sender, **kwargs):
+        raise RuntimeError("verifier is broken")
+
+    signals.verify_portal_eligibility.disconnect(
+        receivers.verify_lease_eligibility,
+        dispatch_uid="property_ops.verify_lease_eligibility",
+    )
+    signals.verify_portal_eligibility.connect(
+        exploding_verifier, dispatch_uid="test.exploding_verifier"
+    )
+    try:
+        pm = make_user("property_manager")
+        contact = make_contact()
+        lease = make_lease_for(tenant=contact)
+
+        response = invite(
+            auth_client(pm),
+            contact=contact,
+            ref_type="LEASE",
+            ref_id=lease.id,
+            portal_type="TENANT",
+        )
+        assert response.status_code == 400, response.data
+    finally:
+        signals.verify_portal_eligibility.disconnect(
+            exploding_verifier, dispatch_uid="test.exploding_verifier"
+        )
+        receivers.connect()
+
+
+def test_a_broken_audit_receiver_does_not_undo_the_registration(
+    auth_client, super_admin, branch, monkeypatch
+):
+    """Audit is fire-and-forget. A crashing receiver must not roll back the thing it was
+    only meant to record — hence send_robust plus the savepoint in record_event."""
+    from apps.identity.models import User
+    from apps.platform import receivers
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("audit backend is down")
+
+    monkeypatch.setattr(receivers, "record_event", boom)
+
+    response = auth_client(super_admin).post(
+        USERS_URL,
+        {
+            "email": "survivor@acme.test",
+            "first_name": "Sur",
+            "last_name": "Vivor",
+            "password": "what-a-pass-9911",
+            "role_code": "agent",
+            "branch": str(branch.id),
+        },
+    )
+
+    assert response.status_code == 201, response.data
+    assert User.objects.filter(email="survivor@acme.test").exists()

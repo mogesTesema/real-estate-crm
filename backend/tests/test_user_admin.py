@@ -358,3 +358,30 @@ def test_the_last_administrator_counts_a_bootstrap_superuser(
     assert (
         auth_client(remover).delete(f"{USERS_URL}{bootstrap.id}/").status_code == 204
     )
+
+
+class TestRevokeAcceptsEitherForm:
+    """A body on a DELETE is legal but awkward — some HTTP clients and intermediaries drop it
+    silently — so the query-string form is offered as the portable alternative."""
+
+    def test_revoke_via_request_body(self, auth_client, super_admin, make_user):
+        target = make_user("agent")
+        response = auth_client(super_admin).delete(
+            f"{USERS_URL}{target.id}/roles/", {"role_code": "agent"}, format="json"
+        )
+        assert response.status_code == 204
+        assert not target.user_roles.exists()
+
+    def test_revoke_via_query_string(self, auth_client, super_admin, make_user):
+        target = make_user("agent")
+        response = auth_client(super_admin).delete(
+            f"{USERS_URL}{target.id}/roles/?role_code=agent"
+        )
+        assert response.status_code == 204
+        assert not target.user_roles.exists()
+
+    def test_revoke_with_neither_is_a_clear_400(self, auth_client, super_admin, make_user):
+        target = make_user("agent")
+        response = auth_client(super_admin).delete(f"{USERS_URL}{target.id}/roles/")
+        assert response.status_code == 400
+        assert "role_code" in str(response.data)
