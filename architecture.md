@@ -1,6 +1,6 @@
 # Real Estate Management System Database Schema & Architecture Specification
 
-> **Version 3.2** (revised Aug 12, 2026). Aligns with SRS 2.1 admin mandatory requirements: Super Admin is highest authority; registration hierarchy Manager → Broker/Owner → Agent; **rental-tenant / portal-client isolation** (not SaaS multi-tenant); portal access only after completed contract; mandatory Property Manager per property; sales-officer GPS field tracking sessions; lead de-dup includes same property + same lead type. Retains v3.1 DAG/schema hardenings.
+> **Version 3.3** (revised Sep 18, 2026). Closes seven gaps found by reading the SRS against the built v3.2 schema — lead follow-up SLA / de-dup / acknowledgment fields, deal stage history, deal↔property links, co-listing agent, owner mandate terms, and the trigram indexes SRS 5.1 needs (see the v3.3 changelog below). Retains everything v3.2 established: alignment with SRS 2.1 admin mandatory requirements: Super Admin is highest authority; registration hierarchy Manager → Broker/Owner → Agent; **rental-tenant / portal-client isolation** (not SaaS multi-tenant); portal access only after completed contract; mandatory Property Manager per property; sales-officer GPS field tracking sessions; lead de-dup includes same property + same lead type. Retains v3.1 DAG/schema hardenings.
 
 ## Architecture Principles
 * **Deployment Scope:** Single real estate company — internal operational monolith (not a multi-company SaaS product).
@@ -270,7 +270,7 @@ Portal paths by `portal_type` (under `PORTAL_OWN`):
 * **Buyer/Seller:** own closed deals/offers/documents linked to the contact.
 
 Rules:
-* Every scoped entity MUST carry an ownership anchor: `assigned_agent_id` (contacts, crm leads, inventory listings), `owner_id` (crm deals), `managed_by_id` (inventory properties), `property_manager_id` (property_ops leases). Child records inherit scope from their parent.
+* Every scoped entity MUST carry an ownership anchor: `assigned_agent_id` (contacts, crm leads, inventory listings — for listings, `co_listing_agent_id` is a second anchor, added v3.3), `owner_id` (crm deals), `managed_by_id` (inventory properties), `property_manager_id` (property_ops leases). A lead carries **two** anchors, `assigned_agent_id` and `assigned_team_id`, because it may be assigned to a team pool before any individual picks it up; `OWN` scope must see both. Child records inherit scope from their parent.
 * Explicit cross-user sharing is modeled by `identity_record_share` (§4) and unioned in `apply_scope`.
 * Field-level masking is modeled by `identity_field_permission` (§4) and enforced in serializers.
 * Postgres RLS keyed on a session GUC is **optional** defense-in-depth for finance tables; the application scoping layer is **mandatory**.
@@ -289,6 +289,20 @@ Human-readable sequential identifiers (`reference_code`, `invoice_number`, `paym
 ### Geospatial
 
 Property (and optionally contact) locations use a PostGIS `geography(Point, 4326)` column (`geo_point`) in addition to the human-readable `latitude`/`longitude`, with a **GiST spatial index** to serve radius / map-drawn / nearest search (SRS 3.3.7) and the 1s-over-1M search target (SRS 5.1). Name/address text search uses Postgres full-text + `pg_trgm` (Elasticsearch intentionally omitted at single-company scale).
+
+### Text search indexes (normative, added v3.3)
+
+SRS 5.1: *"Search across contacts/properties shall return results within 1 second for databases of up to 1,000,000 records."* The `pg_trgm` extension alone does not deliver this — v3.2 named the extension but specified no index, and Django's own `_like` b-tree indexes serve only **prefix** matches. A CRM search box is used for infix and misspelt input, which falls back to a sequential scan.
+
+A **GIN index with the `gin_trgm_ops` operator class** is therefore required on each searched column:
+
+| Table | Columns |
+| :--- | :--- |
+| `contacts_contact` | `first_name`, `last_name`, `company_name`, `email`, `phone` |
+| `inventory_property` | `title`, `address_line_1`, `city` |
+| `inventory_listing` | `title`, `reference_code` |
+
+The same indexes serve the fuzzy duplicate suggestion at lead capture (§5, SRS 3.1.3) via the similarity operators. Index the column directly — **no `UPPER()` wrapper**: `gin_trgm_ops` answers `ILIKE` (and so Django's `__icontains`) natively, and an expression index on `UPPER(col)` would not be used by an `ILIKE` query at all.
 
 ### Audit Columns
 
@@ -310,6 +324,30 @@ These are **not optional gaps** — schemas appear in their owning sections belo
 9. **`crm_agent_field_session` + `crm_agent_location_point`** — mandatory sales-officer GPS field tracking (SRS 3.16.5–3.16.7) (§9).
 10. **Portal eligibility** — `identity_portal_profile` ACTIVE only after completed contract (SRS 3.11.2) (§4).
 11. **Mandatory Property Manager** — `inventory_property.managed_by_id` required (SRS 3.3.10) (§8).
+
+### Changelog — v3.3 (schema gaps found against the SRS)
+
+v3.2 was implemented faithfully, and the implementation is what exposed these: seven SRS
+requirements had **no column or table to land in**. Each entry names the requirement that
+forced it. Schemas appear in their owning sections.
+
+| # | SRS | Requirement, abridged | v3.2 had | v3.3 adds | § |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 1 | 3.1.9 | flag leads with no follow-up inside a configurable SLA window | nothing | `crm_lead.sla_due_at`, `sla_breached`, `first_response_at` + index `(sla_breached, sla_due_at)` | 7 |
+| 2 | 3.1.10 / 3.1.11 | flag likely duplicates at capture | the matching *rule*, no flag column | `crm_lead.is_possible_duplicate` | 7 |
+| 3 | 3.1.12 | instant automated acknowledgment on capture | nothing | `crm_lead.acknowledged` | 7 |
+| 4 | 3.4.4 | **mandatory** reason + next action when a deal moves stage or is marked Lost | history tables for leads and properties, **none for deals** | `crm_deal_stage_history`, with `CHECK (reason <> '')` | 9 |
+| 5 | 3.4.7 | link one or more properties to an opportunity, one matched once identified | §3's diagram promised `Deal ├── Property/properties`; §9's table had no link | `crm_deal_property` (NULLS NOT DISTINCT; one primary per deal) | 9 |
+| 6 | 3.3.5 | multi-agent / co-listing assignment | one agent per listing | `inventory_listing.co_listing_agent_id`, distinct from `assigned_agent_id` | 8 |
+| 7 | 3.3.9 | owner records with commission / mandate terms | ownership share and dates only | `inventory_property_owner.commission_rate`, `mandate_type`, `mandate_expires_at` | 8 |
+| 8 | 5.1 | search contacts/properties in 1s over 1,000,000 records | `pg_trgm` named, **no index specified** | GIN `gin_trgm_ops` indexes on ten searched columns | 2 |
+
+One change is not SRS-driven but performance-driven: **`crm_deal.stage_entered_at`** (§9), so
+the Kanban's per-card "days in stage" (SRS 3.4.6) is a column read rather than a scan of the
+new history table per card.
+
+`co_listing_agent_id` also becomes a row-scoping **anchor** in §2's doctrine: an agent on `OWN`
+scope sees listings they co-list, not only those they lead.
 
 
 ## 3. Core Entity Relationships
@@ -924,6 +962,16 @@ lost_reason TEXT NULL
 
 custom_data JSONB
 
+sla_due_at TIMESTAMPTZ NULL
+
+sla_breached BOOLEAN DEFAULT FALSE
+
+first_response_at TIMESTAMPTZ NULL
+
+acknowledged BOOLEAN DEFAULT FALSE
+
+is_possible_duplicate BOOLEAN DEFAULT FALSE
+
 deleted_at TIMESTAMPTZ NULL
 
 created_by UUID FK identity_user NULL
@@ -933,6 +981,10 @@ updated_by UUID FK identity_user NULL
 created_at TIMESTAMPTZ
 
 updated_at TIMESTAMPTZ
+
+Index: (sla_breached, sla_due_at) — the sweep's access path.
+
+Follow-up SLA (SRS 3.1.9, added v3.3): `sla_due_at` is set at capture from the configurable `LEAD_SLA_MINUTES`; the first outbound response stamps `first_response_at`, which stops the clock. A scheduled sweep sets `sla_breached` on leads past due with no response and still open. `acknowledged` (SRS 3.1.12) records that the instant automated acknowledgment was sent, so a failed send can be retried without double-sending. `is_possible_duplicate` (SRS 3.1.10 / 3.1.11) is a **flag, not a block** — the requirement is to stop two agents independently working the same prospect, not to drop the lead.
 
 Lead de-dup (SRS 3.1.3 / 3.1.10 / 3.1.11): at capture, match phone/email/name against contacts, and additionally flag duplicates when the same contact identifiers target the **same `target_property_id`** with the **same `lead_type`**.
 
@@ -1211,7 +1263,15 @@ start_date DATE
 
 end_date DATE NULL
 
+commission_rate DECIMAL NULL
+
+mandate_type VARCHAR NULL (EXCLUSIVE, NON_EXCLUSIVE, OPEN, SOLE_SELLING)
+
+mandate_expires_at DATE NULL
+
 Constraints: ownership_percentage > 0 AND ownership_percentage <= 100
+
+Note (SRS 3.3.9, added v3.3): "owner records per listing (linking to a Contact) with commission/mandate terms". The terms sit on the ownership agreement rather than on `inventory_listing` so they survive a listing being withdrawn and relisted, and so a property with several owners can carry different terms per owner. `inventory_listing.commission_rate` remains the rate actually quoted on that listing.
 
 inventory_listing
 id UUID PK
@@ -1248,6 +1308,8 @@ is_exclusive BOOLEAN DEFAULT FALSE
 
 assigned_agent_id UUID FK identity_user NULL
 
+co_listing_agent_id UUID FK identity_user NULL
+
 custom_data JSONB
 
 deleted_at TIMESTAMPTZ NULL
@@ -1259,6 +1321,10 @@ updated_by UUID FK identity_user
 created_at TIMESTAMPTZ
 
 updated_at TIMESTAMPTZ
+
+Note (SRS 3.3.5, added v3.3): "multi-agent/co-listing assignment". `assigned_agent_id` is the listing agent of record; `co_listing_agent_id` is the second agent on the mandate. Both are row-scoping anchors — a co-listing agent on `OWN` scope sees the listing (§2).
+
+Constraint: co_listing_agent_id IS DISTINCT FROM assigned_agent_id.
 
 inventory_media
 id UUID PK
@@ -1366,6 +1432,8 @@ custom_data JSONB
 
 status VARCHAR (OPEN, WON, LOST, CANCELLED)
 
+stage_entered_at TIMESTAMPTZ
+
 deleted_at TIMESTAMPTZ NULL
 
 created_by UUID FK identity_user
@@ -1377,6 +1445,46 @@ created_at TIMESTAMPTZ
 updated_at TIMESTAMPTZ
 
 Note: `status = LOST` requires a non-null `lost_reason` (mandatory loss reason, SRS 3.4.5) — enforced at service layer / CHECK.
+
+Note (added v3.3): `stage_entered_at` is stamped by `crm.services.move_stage` on every transition. "Days in stage" — which the Kanban board renders on every card (SRS 3.4.6) — is then `now - stage_entered_at`, a column read, rather than a scan of `crm_deal_stage_history` per card.
+
+crm_deal_stage_history
+id UUID PK
+
+deal_id UUID FK crm_deal
+
+from_stage_id UUID FK crm_pipeline_stage NULL
+
+to_stage_id UUID FK crm_pipeline_stage
+
+changed_by UUID FK identity_user
+
+reason TEXT NOT NULL
+
+next_action VARCHAR NULL
+
+changed_at TIMESTAMPTZ
+
+Constraint: CHECK (reason <> '')
+
+Note (SRS 3.4.4, added v3.3): "The System shall require users to log a mandatory reason and next action when a deal moves stage or is marked Lost." v3.2 defined status-history tables for leads (§7) and properties (§8) but none for deals, so the mandate had nowhere to land. `from_stage_id` is null only for the row recording the deal's creation. The CHECK is what makes the reason genuinely mandatory — NOT NULL alone would accept the empty string. Written only by `crm.services.move_stage`, inside the same transaction as the stage change.
+
+crm_deal_property
+id UUID PK
+
+deal_id UUID FK crm_deal
+
+property_id UUID FK inventory_property
+
+unit_id UUID FK inventory_unit NULL
+
+is_primary BOOLEAN DEFAULT FALSE
+
+created_at TIMESTAMPTZ
+
+Constraints: UNIQUE(deal_id, property_id, unit_id) **NULLS NOT DISTINCT**; UNIQUE(deal_id) WHERE is_primary.
+
+Note (SRS 3.4.7, added v3.3): "linking one or more properties to an opportunity, and one opportunity to a specific matched property once identified". §3's entity diagram already listed `Deal ├── Property/properties`, but v3.2's §9 table carried no such column — the diagram and the schema disagreed. Hence many rows per deal, with `is_primary` marking the one finally matched, and a partial unique index making "one" mean one. `unit_id` is null when the deal is about a whole property; **NULLS NOT DISTINCT** is required for the first constraint, or Postgres's default treatment of nulls as distinct lets the same property be linked to the same deal repeatedly.
 
 crm_viewing
 id UUID PK

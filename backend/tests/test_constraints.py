@@ -648,3 +648,170 @@ def test_reconciliation_difference_is_derived_not_free_form(db, account):
             closing_balance_system=900, difference=0,  # lies: should be 100
             status=Reconciliation.Status.OPEN,
         )
+
+
+# --- SRS-driven schema amendments (v3.3) ------------------------------------
+
+
+class TestDealStageHistory:
+    """SRS 3.4.4 — "log a mandatory reason and next action when a deal moves stage or is
+    marked Lost". architecture.md v3.2 defined history tables for leads and properties but
+    none for deals, so the mandate had nowhere to land."""
+
+    def test_a_stage_move_records_its_reason(self, db, make_deal, make_user, pipeline):
+        from apps.crm.models import DealStageHistory
+
+        deal = make_deal()
+        stages = list(pipeline.stages.all())
+
+        row = DealStageHistory.objects.create(
+            deal=deal,
+            from_stage=stages[0],
+            to_stage=stages[1],
+            changed_by=make_user(),
+            reason="Client confirmed the viewing.",
+            next_action="Send the offer letter",
+        )
+        assert row.pk and row.changed_at
+
+    def test_an_empty_reason_is_refused(self, db, make_deal, make_user, pipeline):
+        """"Mandatory" means a reason, not a placeholder. A NOT NULL column alone would
+        accept the empty string."""
+        from apps.crm.models import DealStageHistory
+
+        stages = list(pipeline.stages.all())
+        with pytest.raises(IntegrityError), transaction.atomic():
+            DealStageHistory.objects.create(
+                deal=make_deal(), from_stage=stages[0], to_stage=stages[1],
+                changed_by=make_user(), reason="",
+            )
+
+    def test_the_first_move_may_have_no_from_stage(self, db, make_deal, make_user, pipeline):
+        from apps.crm.models import DealStageHistory
+
+        assert DealStageHistory.objects.create(
+            deal=make_deal(), from_stage=None, to_stage=pipeline.stages.first(),
+            changed_by=make_user(), reason="Created.",
+        ).pk
+
+
+class TestDealProperty:
+    """SRS 3.4.7 — "linking one or more properties to an opportunity, and one opportunity to
+    a specific matched property once identified"."""
+
+    def test_a_deal_can_reference_several_properties(self, db, make_deal, make_property):
+        from apps.crm.models import DealProperty
+
+        deal = make_deal()
+        for _ in range(3):
+            DealProperty.objects.create(deal=deal, property=make_property())
+        assert deal.deal_properties.count() == 3
+
+    def test_the_same_property_cannot_be_linked_twice(self, db, make_deal, make_property):
+        from apps.crm.models import DealProperty
+
+        deal, prop = make_deal(), make_property()
+        DealProperty.objects.create(deal=deal, property=prop)
+        with pytest.raises(IntegrityError), transaction.atomic():
+            DealProperty.objects.create(deal=deal, property=prop)
+
+    def test_only_one_property_can_be_the_matched_one(self, db, make_deal, make_property):
+        """"one opportunity to a specific matched property" — one, not several."""
+        from apps.crm.models import DealProperty
+
+        deal = make_deal()
+        DealProperty.objects.create(deal=deal, property=make_property(), is_primary=True)
+        with pytest.raises(IntegrityError), transaction.atomic():
+            DealProperty.objects.create(
+                deal=deal, property=make_property(), is_primary=True
+            )
+
+    def test_two_deals_may_each_have_their_own_primary(self, db, make_deal, make_property):
+        from apps.crm.models import DealProperty
+
+        for _ in range(2):
+            DealProperty.objects.create(
+                deal=make_deal(), property=make_property(), is_primary=True
+            )
+
+
+def test_a_listing_can_carry_a_co_listing_agent(db, make_property, make_user):
+    """SRS 3.3.5 — "multi-agent/co-listing assignment"."""
+    from apps.inventory.models import Listing
+
+    listing = Listing.objects.create(
+        property=make_property(),
+        reference_code="LST-CO-1",
+        listing_type=Listing.ListingType.SALE,
+        title="Co-listed villa",
+        status=Listing.Status.ACTIVE,
+        assigned_agent=make_user("agent"),
+        co_listing_agent=make_user("agent"),
+    )
+    assert listing.assigned_agent_id != listing.co_listing_agent_id
+
+
+def test_a_listing_cannot_be_co_listed_with_its_own_agent(db, make_property, make_user):
+    """Co-listing means a *second* agent."""
+    from apps.inventory.models import Listing
+
+    agent = make_user("agent")
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Listing.objects.create(
+            property=make_property(),
+            reference_code="LST-CO-2",
+            listing_type=Listing.ListingType.SALE,
+            title="Self co-listed",
+            status=Listing.Status.ACTIVE,
+            assigned_agent=agent,
+            co_listing_agent=agent,
+        )
+
+
+def test_a_listing_with_no_co_listing_agent_is_fine(db, make_property, make_user):
+    """The constraint is IS DISTINCT FROM in spirit: the common case is one agent and a null
+    co-lister, and a NOT (a = b) check must not trip on the null."""
+    from apps.inventory.models import Listing
+
+    assert Listing.objects.create(
+        property=make_property(),
+        reference_code="LST-CO-3",
+        listing_type=Listing.ListingType.SALE,
+        title="Single agent",
+        status=Listing.Status.ACTIVE,
+        assigned_agent=make_user("agent"),
+    ).pk
+
+
+def test_owner_records_carry_mandate_terms(db, make_property):
+    """SRS 3.3.9 — "owner records per listing (linking to a Contact) with commission/mandate
+    terms". The terms belong to the ownership agreement, so they survive a listing being
+    withdrawn and relisted."""
+    from apps.inventory.models import PropertyOwner
+
+    owner = PropertyOwner.objects.create(
+        property=make_property(),
+        contact=make_contact(),
+        ownership_percentage=100,
+        is_primary_owner=True,
+        start_date="2026-01-01",
+        commission_rate=2.5,
+        mandate_type=PropertyOwner.MandateType.EXCLUSIVE,
+        mandate_expires_at="2026-12-31",
+    )
+    assert owner.mandate_type == "EXCLUSIVE"
+
+
+def test_lead_carries_the_sla_and_capture_flags(db, make_contact):
+    """SRS 3.1.9, 3.1.10, 3.1.12 — architecture.md v3.2 omitted all five fields, so none of
+    those three requirements had anywhere to record their state."""
+    from apps.crm.models import Lead
+
+    lead = Lead.objects.create(
+        contact=make_contact(), lead_type=Lead.LeadType.BUY, title="Villa enquiry"
+    )
+    assert lead.sla_due_at is None
+    assert lead.sla_breached is False
+    assert lead.first_response_at is None
+    assert lead.acknowledged is False
+    assert lead.is_possible_duplicate is False

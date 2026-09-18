@@ -9,6 +9,7 @@ at the same time (SRS 3.2.2). Do not collapse `ContactRole` back into an enum fi
 import uuid
 
 from django.conf import settings
+from django.contrib.postgres.indexes import GinIndex
 from django.db import models
 
 from apps.core.models import SoftDeleteModel
@@ -73,6 +74,44 @@ class Contact(SoftDeleteModel):
 
     class Meta:
         db_table = "contacts_contact"
+        indexes = [
+            # SRS 5.1: "Search across contacts/properties shall return results within 1
+            # second for databases of up to 1,000,000 records."
+            #
+            # Django's `_like` b-tree indexes serve only prefix matches. A CRM search box is
+            # used for infix and misspelt input, which falls back to a sequential scan —
+            # seconds at a million rows. GIN over gin_trgm_ops answers ILIKE '%...%' and the
+            # similarity operators, which is also what makes the fuzzy duplicate suggestion
+            # in architecture.md §5 possible at capture time.
+            #
+            # No UPPER() wrapper: gin_trgm_ops serves ILIKE (and so Django's __icontains)
+            # directly, which is the whole point of the operator class.
+            GinIndex(
+                fields=["first_name"],
+                opclasses=["gin_trgm_ops"],
+                name="contacts_first_name_trgm",
+            ),
+            GinIndex(
+                fields=["last_name"],
+                opclasses=["gin_trgm_ops"],
+                name="contacts_last_name_trgm",
+            ),
+            GinIndex(
+                fields=["company_name"],
+                opclasses=["gin_trgm_ops"],
+                name="contacts_company_trgm",
+            ),
+            GinIndex(
+                fields=["email"],
+                opclasses=["gin_trgm_ops"],
+                name="contacts_email_trgm",
+            ),
+            GinIndex(
+                fields=["phone"],
+                opclasses=["gin_trgm_ops"],
+                name="contacts_phone_trgm",
+            ),
+        ]
 
     def __str__(self):
         if self.contact_type == self.ContactType.COMPANY:

@@ -258,6 +258,11 @@ if AWS_STORAGE_BUCKET_NAME:
     AWS_S3_USE_SSL = env_bool("AWS_S3_USE_SSL", False)
     AWS_QUERYSTRING_AUTH = True
 
+# --- Domain settings --------------------------------------------------------
+# SRS 3.1.9: "flag and alert on leads with no follow-up activity within a configurable SLA
+# window." Configurable is the operative word — it varies by market and by team.
+LEAD_SLA_MINUTES = int(env("LEAD_SLA_MINUTES", "60"))
+
 # --- Email ------------------------------------------------------------------
 # Used by the password-reset flow. Console backend by default: nothing is configured for real
 # delivery yet, and silently dropping a reset link is worse than printing it. Production sets

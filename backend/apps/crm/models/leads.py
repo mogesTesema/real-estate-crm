@@ -104,8 +104,30 @@ class Lead(SoftDeleteModel):
     lost_reason = models.TextField(null=True, blank=True)
     custom_data = models.JSONField(default=dict, blank=True)
 
+    # --- Follow-up SLA (SRS 3.1.9) ---------------------------------------------------
+    # "flag and alert on leads with no follow-up activity within a configurable SLA
+    # window". Set at capture from LEAD_SLA_MINUTES; `first_response_at` stops the clock;
+    # the `sweep_sla` management command marks the breach.
+    sla_due_at = models.DateTimeField(null=True, blank=True)
+    sla_breached = models.BooleanField(default=False)
+    first_response_at = models.DateTimeField(null=True, blank=True)
+
+    # SRS 3.1.12 — "send an instant, automated acknowledgment ... immediately upon lead
+    # capture". Recorded so a failed send can be retried without double-sending.
+    acknowledged = models.BooleanField(default=False)
+
+    # SRS 3.1.10 / 3.1.11 — flagged rather than blocked at capture, because the point is to
+    # stop "two agents independently contacting the same prospect", not to lose the lead.
+    is_possible_duplicate = models.BooleanField(default=False)
+
     class Meta:
         db_table = "crm_lead"
+        indexes = [
+            # The sweep's query: overdue, unanswered, still open.
+            models.Index(
+                fields=["sla_breached", "sla_due_at"], name="crm_lead_sla_sweep_idx"
+            ),
+        ]
 
     def __str__(self):
         return self.title

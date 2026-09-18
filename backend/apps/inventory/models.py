@@ -157,6 +157,24 @@ class Property(SoftDeleteModel):
             # models.Index here would build silently and never be chosen by the planner.
             GinIndex(fields=["amenities"], name="inventory_property_amen_gin"),
             GinIndex(fields=["custom_data"], name="inventory_property_cust_gin"),
+            # SRS 5.1 / 3.3.7 — "advanced search and filtering of the property database by
+            # any attribute" within 1s over 1,000,000 records. Trigram GIN answers the infix
+            # text search; the GiST index on geo_point answers the radius half.
+            GinIndex(
+                fields=["title"],
+                opclasses=["gin_trgm_ops"],
+                name="inventory_property_title_trgm",
+            ),
+            GinIndex(
+                fields=["address_line_1"],
+                opclasses=["gin_trgm_ops"],
+                name="inventory_property_addr_trgm",
+            ),
+            GinIndex(
+                fields=["city"],
+                opclasses=["gin_trgm_ops"],
+                name="inventory_property_city_trgm",
+            ),
         ]
         # No explicit index for geo_point: PointField defaults to spatial_index=True and
         # already emits the GiST index that serves radius / map-drawn / nearest search
@@ -254,6 +272,11 @@ class PropertyOwner(models.Model):
     sum to 100, since ownership periods overlap and change over time.
     """
 
+    class MandateType(models.TextChoices):
+        EXCLUSIVE = "EXCLUSIVE", "Exclusive"
+        OPEN = "OPEN", "Open / shared"
+        SOLE_SELLING = "SOLE_SELLING", "Sole selling rights"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     property = models.ForeignKey(Property, on_delete=models.PROTECT, related_name="owners")
     contact = models.ForeignKey(
@@ -263,6 +286,16 @@ class PropertyOwner(models.Model):
     is_primary_owner = models.BooleanField(default=False)
     start_date = models.DateField()
     end_date = models.DateField(null=True, blank=True)
+    # SRS 3.3.9 — "owner records per listing (linking to a Contact) with commission/mandate
+    # terms". The commission rate and mandate belong to the owner agreement, not to the
+    # marketed listing: they survive a listing being withdrawn and relisted.
+    commission_rate = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True
+    )
+    mandate_type = models.CharField(
+        max_length=20, choices=MandateType.choices, null=True, blank=True
+    )
+    mandate_expires_at = models.DateField(null=True, blank=True)
 
     class Meta:
         db_table = "inventory_property_owner"
@@ -317,16 +350,44 @@ class Listing(SoftDeleteModel):
         on_delete=models.SET_NULL,
         related_name="assigned_listings",
     )
+    # SRS 3.3.5 — "exclusive and open/shared listings, and multi-agent/co-listing
+    # assignment". `is_exclusive` covers the mandate; this covers the second agent. Both
+    # agents see the listing under OWN scope.
+    co_listing_agent = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="co_listed_listings",
+    )
     custom_data = models.JSONField(default=dict, blank=True)
 
     class Meta:
         db_table = "inventory_listing"
+        indexes = [
+            GinIndex(
+                fields=["title"],
+                opclasses=["gin_trgm_ops"],
+                name="inventory_listing_title_trgm",
+            ),
+            GinIndex(
+                fields=["reference_code"],
+                opclasses=["gin_trgm_ops"],
+                name="inventory_listing_ref_trgm",
+            ),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=["reference_code"],
                 condition=models.Q(deleted_at__isnull=True),
                 name="inventory_listing_reference_uniq",
-            )
+            ),
+            # A listing co-listed with itself is not a co-listing. IS DISTINCT FROM, so a
+            # null co-listing agent (the common case) passes.
+            models.CheckConstraint(
+                condition=~models.Q(co_listing_agent=models.F("assigned_agent")),
+                name="inventory_listing_colist_distinct",
+            ),
         ]
 
     def __str__(self):

@@ -58,6 +58,9 @@ class Deal(SoftDeleteModel):
     next_action_due_at = models.DateTimeField(null=True, blank=True)
     custom_data = models.JSONField(default=dict, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN)
+    # Denormalised from the stage history so "days in stage" is a subtraction rather than a
+    # scan of every history row for every card on the board.
+    stage_entered_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "crm_deal"
@@ -78,6 +81,97 @@ class Deal(SoftDeleteModel):
 
     def __str__(self):
         return self.reference_code
+
+
+class DealStageHistory(models.Model):
+    """Every stage movement, with the reason that justified it (SRS 3.4.4).
+
+    > "The System shall log a mandatory reason and next action when a deal moves stage or is
+    >  marked Lost."
+
+    `reason` is NOT NULL and the service refuses an empty one: a pipeline whose history says
+    only *that* a deal moved, never *why*, cannot answer the question a manager actually
+    asks. `crm_lead_status_history` and `inventory_property_status_history` already exist for
+    their entities; this is the deal's equivalent.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(Deal, on_delete=models.CASCADE, related_name="stage_history")
+    from_stage = models.ForeignKey(
+        PipelineStage,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    to_stage = models.ForeignKey(
+        PipelineStage, on_delete=models.PROTECT, related_name="+"
+    )
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+"
+    )
+    reason = models.TextField()
+    next_action = models.CharField(max_length=200, null=True, blank=True)
+    changed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "crm_deal_stage_history"
+        ordering = ["deal", "-changed_at"]
+        constraints = [
+            # The mandate is "a mandatory reason", so an empty string is not a reason.
+            models.CheckConstraint(
+                condition=~models.Q(reason=""), name="crm_deal_stage_reason_not_blank"
+            ),
+        ]
+
+
+class DealProperty(models.Model):
+    """The properties an opportunity is about (SRS 3.4.7).
+
+    > "The System shall support linking one or more properties to an opportunity, and one
+    >  opportunity to a specific matched property once identified."
+
+    Hence many rows per deal, with `is_primary` marking the one finally matched.
+    architecture.md §3's entity diagram lists "Deal ├── Property/properties" but §9's table
+    definition omits any such column; this closes that gap (see the v3.3 changelog).
+
+    `unit` is optional: a deal may be about a whole property or one addressable unit of it.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    deal = models.ForeignKey(Deal, on_delete=models.CASCADE, related_name="deal_properties")
+    property = models.ForeignKey(
+        "inventory.Property", on_delete=models.PROTECT, related_name="deal_links"
+    )
+    unit = models.ForeignKey(
+        "inventory.Unit",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="deal_links",
+    )
+    is_primary = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "crm_deal_property"
+        constraints = [
+            # NULLS NOT DISTINCT: `unit` is null for a whole-property link, and Postgres
+            # would otherwise treat two such rows as distinct, letting the same property be
+            # attached to the same deal twice.
+            models.UniqueConstraint(
+                fields=["deal", "property", "unit"],
+                name="crm_deal_property_uniq",
+                nulls_distinct=False,
+            ),
+            # "one opportunity to a specific matched property once identified" — one primary,
+            # not several.
+            models.UniqueConstraint(
+                fields=["deal"],
+                condition=models.Q(is_primary=True),
+                name="crm_deal_one_primary_property",
+            ),
+        ]
 
 
 class Viewing(BaseModel):

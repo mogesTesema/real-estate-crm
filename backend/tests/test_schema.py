@@ -78,6 +78,8 @@ EXPECTED_TABLES = {
         "crm_closing_checklist",
         "crm_closing_checklist_item",
         "crm_transaction",
+        "crm_deal_stage_history",
+        "crm_deal_property",
     },
     "property_ops": {
         "property_ops_lease",
