@@ -10,7 +10,7 @@ party), never a software customer.
 
 The frontend (React + TypeScript + Vite) lives in a separate repository.
 
-## Status: schema complete, services pass next
+## Status: schema complete; the identity API is live
 
 An earlier Phase-1 backend shipped a working API over a flat seven-app layout. It is
 preserved at tag **`phase1-flat-layout`** and has been replaced, because architecture.md v3.2
@@ -24,10 +24,11 @@ of doctrine:
   is now to make the **append-only** tables genuinely immutable.
 - **"Tenant" was redefined** to mean a rental tenant, so the partition column is gone entirely.
 
-The rebuild follows architecture.md's own Implementation Roadmap. That roadmap is now
-complete for **schema only** — models, migrations, and constraints for all 98 tables.
-Services, selectors, and the HTTP API are a deliberate second pass, so **there are no API
-endpoints yet** beyond `/healthz/` and Django admin.
+The rebuild follows architecture.md's own Implementation Roadmap, which is complete for
+all 98 tables. The API is now being built on top of it, app by app: **`identity` is done** —
+registration, JWT auth, and user administration, together with
+`identity.selectors.apply_scope`, the mandatory row-visibility layer every later module runs
+through. The other eight apps still have no endpoints.
 
 | Roadmap step | App | Tables | State |
 | :--- | :--- | ---: | :--- |
@@ -47,6 +48,37 @@ endpoints yet** beyond `/healthz/` and Django admin.
 verified against `architecture.md` by `tests/test_spec_coverage.py`.** Next is the services
 pass — see *What is deliberately absent* below.
 
+## The identity API
+
+| | |
+| :--- | :--- |
+| `POST /api/v1/auth/token/` · `token/refresh/` | JWT login (throttled) |
+| `GET` / `PATCH` `/api/v1/auth/me/` | session identity: roles, scopes, what you may grant |
+| `POST /api/v1/auth/change-password/` | |
+| `POST /api/v1/users/` | **register a staff member with their role** |
+| `GET /api/v1/users/` · `{id}/` | scoped directory |
+| `PATCH /api/v1/users/{id}/` · `DELETE` · `{id}/reactivate/` | |
+| `POST` / `DELETE` `/api/v1/users/{id}/roles/` | grant / revoke |
+| `GET /api/v1/roles/` | role catalogue |
+
+**Who may register whom.** architecture.md fixes the chain in three places; the three roles
+it never places go to the roles that already hold agency-wide scope:
+
+| registrar | may create |
+| :--- | :--- |
+| `super_admin` | any staff role |
+| `manager` | `owner` — in their own branch only |
+| `owner` | `agent`, `property_manager`, `marketing`, `finance` |
+| everyone else | nobody |
+
+`portal` is refused: a portal profile must be tied to a contact with a completed contract,
+and the import DAG forbids `identity` from reading `crm` or `property_ops` to verify one.
+That flow belongs to the module that owns the contract.
+
+**Credentials.** The registrar sets an initial password and the new user is confined to
+`/auth/me/` and `/auth/change-password/` until they replace it — the secret was chosen by
+someone else, so it must not unlock the CRM.
+
 ## Architecture in one paragraph
 
 Nine Django apps in a fixed dependency order —
@@ -64,10 +96,19 @@ docker compose up -d          # Postgres+PostGIS, Redis, MinIO, API, Celery work
 docker compose exec backend python manage.py migrate
 ```
 
+- API docs: http://localhost:8000/api/docs/ (Swagger) · http://localhost:8000/api/redoc/
 - Health check: http://localhost:8000/healthz/
-- Django admin: http://localhost:8000/admin/ (create a user with `createsuperuser`)
+- Django admin: http://localhost:8000/admin/
 
-There is no demo seed command and no Swagger UI at present; both return with the API pass.
+**Bootstrap.** `createsuperuser` now attaches the `super_admin` role, so the first
+administrator is usable immediately:
+
+```bash
+docker compose exec backend python manage.py createsuperuser
+```
+
+Create a Company and Branch in Django admin (there is no branches API yet), then register
+everyone else through `POST /api/v1/users/`. There is no demo seed command.
 
 Running without Docker: copy `backend/.env.example` to `backend/.env`, point it at a local
 Postgres+PostGIS instance and Redis, then `pip install -r backend/requirements-dev.txt` and
@@ -97,12 +138,20 @@ The suite is deliberately schema-level while the API is absent. It asserts that:
 
 Recorded so it is not mistaken for oversight. All of it belongs to the services pass:
 
-- **`identity.selectors.apply_scope`** — the mandatory row-level scoping layer (§2). The
-  schema carries every ownership anchor it needs (`assigned_agent`, `owner`, `managed_by`,
-  `property_manager`, `portal_profile.contact`), but **nothing enforces visibility yet**.
-- **Every `services.py` body**, including the orchestrations §1.2 mandates: `mark_deal_won` →
-  `create_lease_from_deal` → `generate_rent_schedule_invoices`; `upsert_activity_for_source`
-  for viewings and inspections; `record_event` for audit.
+- **Domain endpoints.** `apply_scope` exists and is enforced for `user`, but every other
+  resource is unregistered — deliberately, since it raises rather than silently returning an
+  unfiltered queryset. Each module registers its anchors alongside its own endpoints.
+- **Every domain `services.py` body**, including the orchestrations §1.2 mandates:
+  `mark_deal_won` → `create_lease_from_deal` → `generate_rent_schedule_invoices`;
+  `upsert_activity_for_source` for viewings and inspections.
+- **Audit.** §1.3 wants `platform.services.record_event` on every sensitive mutation, but the
+  import DAG forbids `identity → platform`, so the five most audit-worthy events (register,
+  grant, revoke, deactivate, login) currently write no audit row. Resolving this needs either
+  an inverted dependency (identity emits a signal, platform receives it) or an amendment to
+  the §1.2 matrix — a decision, not an oversight.
+- **Token revocation.** `token_blacklist` is not installed and rotation is off, so
+  `is_active=False` is the only revocation mechanism; an access token stays valid for up to
+  its 60-minute lifetime.
 - **Two invariants that a CHECK cannot hold**, both flagged in their model docstrings:
   `Invoice.amount_paid` must equal the sum of its non-reversed allocations (the spec
   recommends a trigger), and commission split percentages must total 100 — that one needs

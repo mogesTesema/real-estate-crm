@@ -4,14 +4,75 @@ Quick daily notes on what got done on the backend and where things stand. Fronte
 is tracked in the frontend repo's own log and omitted here.
 
 **Current state:** the backend has been rebuilt against `architecture.md` v3.2, which
-restructures it into nine apps under a strict import DAG. The **schema pass is complete** —
-all 98 tables, their constraints, and all 256 specified foreign keys are built and verified
-against the spec. **There is still no API** — only `/healthz/` and Django admin; services,
-selectors and the HTTP layer are the next pass. The previous working Phase-1 API is
-preserved at tag **`phase1-flat-layout`**.
+restructures it into nine apps under a strict import DAG. The **schema is complete** (98
+tables, 256 foreign keys, verified against the spec) and the **`identity` API is live** —
+registration, JWT auth, user administration, and `apply_scope`. The other eight apps have
+models but no endpoints. The previous Phase-1 API is preserved at tag
+**`phase1-flat-layout`**.
+
+Bootstrap with `createsuperuser` (it now attaches the `super_admin` role), create a Company
+and Branch in Django admin, then register everyone else via `POST /api/v1/users/`.
 
 The demo logins below no longer exist: `seed_demo` was part of the old layout and was removed
 with it. A new seed command arrives with the API pass.
+
+---
+
+## Day 13: Fri, Sep 18, 2026; registration, auth, and user administration
+
+The first API layer. Ten endpoints under `/api/v1/`, Swagger back at `/api/docs/`, and
+`apply_scope` — the mandatory row-visibility layer — landed alongside them, since listing
+users is the first thing that needs it.
+
+**Registration authority.** The spec states the chain super_admin → manager → owner → agent
+in three places. It reads oddly, because a manager mints an owner who outranks them in data
+scope, but it is explicit twice over and the two are different axes: the manager is a
+branch's onboarding administrator, the owner is the person with agency-wide visibility. The
+three roles the spec never places — property_manager, marketing, finance — went to owner and
+super_admin. `portal` is refused outright: a portal profile needs a contact holding a
+completed contract, and the DAG forbids identity from reading crm or property_ops to check.
+
+**Four defects found while building, three of them security.** Worth recording because none
+were visible from the schema pass:
+
+- **Soft-deleted users could log in.** `UserManager` never overrode `get_by_natural_key`, so
+  `authenticate()` matched on email alone — and once an address was reused, an ordinary
+  login raised `MultipleObjectsReturned`.
+- **`ALL` scope narrowed access instead of widening it.** The predicate returned an empty
+  `Q()`, but `Q()` is Django's *identity* element: `Q() | Q(branch=x)` collapses to
+  `Q(branch=x)`. A user holding both `owner` and `agent` saw only their branch. A grant of
+  everything has to short-circuit, not combine — caught by a test written specifically for
+  the multi-role case.
+- **A manager could grant themselves `owner`**, jumping BRANCH → ALL in one call: escaping
+  the matrix by obeying it, since managers legitimately grant `owner`. The earlier test
+  passed vacuously because it used an agent, who can grant nothing. Probed the hole to
+  confirm it was real, then barred anyone from changing their own roles.
+- **`normalize_email` lowercases only the domain**, so `Alice@` and `alice@` would have
+  become two live rows both satisfying the partial unique index, only one able to log in.
+
+**Decisions with long reach.** `apply_scope` OR-s a user's roles rather than ranking them —
+`UserRole` has no `is_primary` flag, and ranking would need a total ordering over
+`data_scope` that does not exist (FINANCE_ALL is module-wide, BRANCH is org-position-wide).
+An unregistered resource raises rather than returning the unfiltered queryset, because a
+silent fallback is how a scoping layer quietly stops scoping.
+
+`must_change_password` is a new column and a deviation from §4's field list, taken because
+the spec describes no credential-delivery mechanism at all. The gate is a
+`DEFAULT_PERMISSION_CLASS`, not opt-in per view, so a forgotten view cannot weaken it.
+
+**Known gap, flagged rather than fixed:** §1.3 wants `platform.services.record_event` on
+every sensitive mutation, but the import DAG forbids `identity → platform`. Register, grant,
+revoke, deactivate and login — the five most audit-worthy events in the system — currently
+write no audit row. Fixing it needs either an inverted dependency (identity emits a signal,
+platform receives it in `apps.py::ready()`) or an amendment to the §1.2 matrix. That is a
+decision, not an oversight.
+
+**DoD**
+- 213 tests (was 82), including all 49 cells of the authority matrix and the scoping layer
+  tested directly rather than only through HTTP.
+- Walked the whole chain against a running server: root → manager → owner → agent, the
+  forced password change gating the API, an agent seeing branch colleagues in summary form
+  only, and every refusal.
 
 ---
 
