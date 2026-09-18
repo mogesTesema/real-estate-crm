@@ -110,3 +110,92 @@ class IsAgencyAdmin(BasePermission):
         if request.method in SAFE_METHODS:
             return True
         return bool(user.is_superuser or is_agency_admin(user))
+
+
+class IsMarketingStaff(BasePermission):
+    """Marketing configuration — campaigns, drip steps, landing pages.
+
+    §2 grants MARKETING_ALL "campaign/source/landing objects agency-wide"; that module-wide
+    grant is exactly who may *write* marketing configuration. Reads stay open to staff so an
+    agent can see which campaign produced their lead.
+    """
+
+    message = "Only marketing staff or agency administrators may change marketing configuration."
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        if is_portal_client(user):
+            return False
+        if request.method in SAFE_METHODS:
+            return True
+        if user.is_superuser:
+            return True
+        return bool(
+            {Role.DataScope.ALL, Role.DataScope.MARKETING_ALL} & scopes_for(user)
+        )
+
+
+class AgencyAdminOnly(BasePermission):
+    """Closed to everyone below agency admin — reads included.
+
+    `IsAgencyAdmin` leaves reads open to staff, which is right for routing rules (an agent
+    may see why their leads land where they land). It is wrong for integration surfaces:
+    connections and webhooks carry delivery URLs, HMAC secrets, credential references and
+    raw payload snapshots, and the role definitions give Integration Management to the Super
+    Admin alone. Nothing here is something a branch agent needs to *see*.
+    """
+
+    message = "This surface is restricted to agency administrators."
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        return bool(user.is_superuser or is_agency_admin(user))
+
+
+def HasPermission(code):  # noqa: N802 - a permission-class factory reads like a class
+    """Function-level RBAC against the seeded `identity_permission` matrix.
+
+    `HasPermission("finance.approve_commission")` returns a permission class that admits
+    superusers and any user whose roles carry that code. The matrix is seeded
+    behavior-preserving (a code guarding an existing endpoint is granted to every role that
+    could already reach it), so applying this class never tightens anything until an admin
+    edits `identity_role_permission` at runtime — which is the entire point: SRS 3.17.1's
+    "customizable permission matrix" without a breaking change on day one.
+
+    The per-request cache matters: a viewset evaluates permissions once per action, but
+    composed classes and object checks can re-enter; one indexed query per request, not per
+    check.
+    """
+
+    class _HasPermission(BasePermission):
+        message = f"Requires the '{code}' permission."
+        required_code = code
+
+        def has_permission(self, request, view):
+            user = request.user
+            if not (user and user.is_authenticated):
+                return False
+            if user.is_superuser:
+                return True
+            return code in _permission_codes(request)
+
+    _HasPermission.__name__ = f"HasPermission_{code.replace('.', '_')}"
+    return _HasPermission
+
+
+def _permission_codes(request) -> frozenset:
+    cached = getattr(request, "_permission_codes", None)
+    if cached is None:
+        from .models import Permission
+
+        cached = frozenset(
+            Permission.objects.filter(
+                role_permissions__role__user_roles__user=request.user
+            ).values_list("code", flat=True)
+        )
+        request._permission_codes = cached
+    return cached

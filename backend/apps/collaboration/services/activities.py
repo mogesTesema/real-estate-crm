@@ -1,8 +1,4 @@
-"""Public write API for `collaboration` (architecture.md §1.2).
-
-Documents, e-signature, activities and the calendar, communications, notifications.
-
-This is the ONLY module another app may import to mutate `collaboration`-owned rows.
+"""Activities and the unified calendar (architecture.md §13, SRS 3.12).
 
 `upsert_activity_for_source` is the required orchestration §1.2 lists: a domain record that
 appears on the calendar — a viewing, an inspection — owns exactly one activity, and §13
@@ -14,7 +10,7 @@ import logging
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
-from .models import Activity
+from ..models import Activity
 
 logger = logging.getLogger(__name__)
 
@@ -94,3 +90,29 @@ def close_activity_for_source(*, source_type, source_id, status, completed_at=No
     activity.completed_at = completed_at
     activity.save(update_fields=["status", "completed_at"])
     return activity
+
+
+def create_task_for_stage_move(*, deal, subject, actor):
+    """The mandatory next action (SRS 3.4.4) as a real task (SRS 3.4.5).
+
+    Called by `crm.services.move_stage`. Deliberately minimal until the activities pass
+    lands the full task API: an OPEN TASK on the deal owner's list, never raising — a
+    failed task write must not fail a stage move.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        with transaction.atomic():
+            return Activity.objects.create(
+                activity_type=Activity.ActivityType.TASK,
+                subject=subject[:255],
+                assigned_to=deal.owner,
+                created_by=actor,
+                deal=deal,
+                contact=deal.primary_contact,
+                status=Activity.Status.OPEN,
+            )
+    except Exception:  # noqa: BLE001 - courtesy artefact, never blocks the move
+        logger.exception("Stage-move task creation failed for deal=%s", deal.pk)
+        return None

@@ -225,6 +225,20 @@ def assign_lead(lead, *, to_user=None, to_team=None, actor, reason=None):
         LeadAssignment.objects.create(
             lead=lead, from_user=previous, to_user=to_user, assigned_by=actor, reason=reason
         )
+        if to_user.pk != actor.pk:
+            # §1.2's notify orchestration. never raises, so the assignment cannot fail over
+            # a notification.
+            from apps.collaboration import services as collaboration_services
+
+            collaboration_services.notify(
+                recipient=to_user,
+                type="LEAD_ASSIGNED",
+                title=f"Lead assigned: {lead.title}",
+                body=reason,
+                entity_type="LEAD",
+                entity_id=lead.pk,
+                actor=actor,
+            )
     signals.lead_assigned.send_robust(
         sender=None, lead=lead, actor=actor, from_user=previous, to_user=to_user, reason=reason
     )
@@ -692,6 +706,14 @@ def move_stage(deal, stage, *, actor, reason, next_action=None):
         deal=deal, from_stage=previous, to_stage=stage, changed_by=actor,
         reason=reason, next_action=next_action,
     )
+    if (next_action or "").strip() and not terminal:
+        # SRS 3.4.5 — the mandatory next action becomes a real task on the owner's list,
+        # not a string that scrolls away in the stage history.
+        from apps.collaboration import services as collaboration_services
+
+        collaboration_services.create_task_for_stage_move(
+            deal=deal, subject=next_action, actor=actor
+        )
     return deal
 
 
@@ -761,6 +783,7 @@ def schedule_viewing(*, actor, property, contact, agent, scheduled_start, schedu
     reschedule updates the entry rather than adding a second one, and so the same rule holds
     for inspections in a later pass without being re-implemented.
     """
+    from apps.collaboration import services as collaboration_services
 
     from .models import Viewing
 
@@ -778,6 +801,16 @@ def schedule_viewing(*, actor, property, contact, agent, scheduled_start, schedu
         **fields,
     )
     _sync_viewing_activity(viewing, actor=actor)
+    if agent.pk != actor.pk:
+        collaboration_services.notify(
+            recipient=agent,
+            type="VIEWING_SCHEDULED",
+            title=f"Viewing booked: {property.title}",
+            body=f"{scheduled_start:%Y-%m-%d %H:%M} with {contact}",
+            entity_type="VIEWING",
+            entity_id=viewing.pk,
+            actor=actor,
+        )
     return viewing
 
 

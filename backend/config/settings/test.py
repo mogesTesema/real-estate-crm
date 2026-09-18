@@ -34,5 +34,19 @@ PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 # misconfiguration and raises, whereas an explicit None means "unlimited".
 REST_FRAMEWORK = {  # noqa: F405
     **REST_FRAMEWORK,  # noqa: F405
-    "DEFAULT_THROTTLE_RATES": {"login": None, "password_reset": None},
+    "DEFAULT_THROTTLE_RATES": {
+        "login": None,
+        "password_reset": None,
+        "file_upload": None,
+    },
 }
+
+# Files: hermetic local storage, never the S3/MinIO config docker-compose injects. Tests
+# must not depend on a bucket existing or a network service answering; the storage-backend
+# *selection* logic is exercised by `download_target`'s isinstance check either way, and the
+# S3 path is covered by the live e2e walkthrough.
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+}
+MEDIA_ROOT = "/tmp/crm-test-media"

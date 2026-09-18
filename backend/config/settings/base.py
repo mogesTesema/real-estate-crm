@@ -189,6 +189,7 @@ REST_FRAMEWORK = {
         # Password reset is public and sends mail, so it is both a brute-force and a
         # mail-flooding vector.
         "password_reset": env("PASSWORD_RESET_THROTTLE_RATE", "5/min"),
+        "file_upload": env("FILE_UPLOAD_THROTTLE_RATE", "30/min"),
     },
 }
 
@@ -224,6 +225,9 @@ SPECTACULAR_SETTINGS = {
         "ListingStatusEnum": "apps.inventory.models.Listing.Status",
         "LeadStatusEnum": "apps.crm.models.Lead.Status",
         "DealStatusEnum": "apps.crm.models.Deal.Status",
+        # Notification.type and NotificationPreference.notification_type serialize the same
+        # choice set under two field names; one canonical component name for both.
+        "NotificationTypeEnum": "apps.collaboration.models.Notification.Type",
     },
 }
 
@@ -290,6 +294,20 @@ CONTACT_SIMILARITY_THRESHOLD = float(env("CONTACT_SIMILARITY_THRESHOLD", "0.4"))
 # A CSV import runs inline (no Celery on the free tier), so the request has to finish inside
 # the gateway timeout. Rows beyond this are refused with a message rather than truncated.
 CONTACT_IMPORT_MAX_ROWS = int(env("CONTACT_IMPORT_MAX_ROWS", "5000"))
+
+# --- Files (collaboration) --------------------------------------------------
+FILE_UPLOAD_MAX_BYTES = int(env("FILE_UPLOAD_MAX_BYTES", str(25 * 1024 * 1024)))
+
+# --- Channel gateways (collaboration) ---------------------------------------
+# EMAIL is real (Django mail). SMS/WhatsApp/push are logging mocks until real providers are
+# integrated — each mock's counterpart is documented in third-part-needed.md. Swapping is a
+# settings change: point the channel at any class implementing gateways.MessageGateway.
+COLLABORATION_GATEWAYS = {
+    "EMAIL": env("GATEWAY_EMAIL", "apps.collaboration.gateways.DjangoEmailGateway"),
+    "SMS": env("GATEWAY_SMS", "apps.collaboration.gateways.LoggingSmsGateway"),
+    "WHATSAPP": env("GATEWAY_WHATSAPP", "apps.collaboration.gateways.LoggingWhatsAppGateway"),
+    "PUSH": env("GATEWAY_PUSH", "apps.collaboration.gateways.LoggingPushGateway"),
+}
 
 # --- Email ------------------------------------------------------------------
 # Used by the password-reset flow. Console backend by default: nothing is configured for real

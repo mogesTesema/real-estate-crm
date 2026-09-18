@@ -28,6 +28,7 @@ api_v1 = [
     path("", include("apps.inventory.api.urls")),
     path("", include("apps.crm.api.urls")),
     path("", include("apps.platform.api.urls")),
+    path("", include("apps.collaboration.api.urls")),
 ]
 
 urlpatterns = [
