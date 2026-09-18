@@ -52,13 +52,17 @@ pass — see *What is deliberately absent* below.
 
 | | |
 | :--- | :--- |
-| `POST /api/v1/auth/token/` · `token/refresh/` | JWT login (throttled) |
+| `POST /api/v1/auth/token/` · `token/refresh/` | JWT login (throttled, audited) |
+| `POST /api/v1/auth/logout/` | revoke the refresh token |
 | `GET` / `PATCH` `/api/v1/auth/me/` | session identity: roles, scopes, what you may grant |
 | `POST /api/v1/auth/change-password/` | |
+| `POST /api/v1/auth/forgot-password/` · `reset-password/` | |
 | `POST /api/v1/users/` | **register a staff member with their role** |
-| `GET /api/v1/users/` · `{id}/` | scoped directory |
+| `GET /api/v1/users/` · `{id}/` | scoped staff directory (clients excluded) |
 | `PATCH /api/v1/users/{id}/` · `DELETE` · `{id}/reactivate/` | |
 | `POST` / `DELETE` `/api/v1/users/{id}/roles/` | grant / revoke |
+| `POST /api/v1/portal-users/` | **invite a client to the portal** |
+| `GET /api/v1/portal-users/` · `{id}/` · `DELETE` | list, view, suspend |
 | `GET /api/v1/roles/` | role catalogue |
 
 **Who may register whom.** architecture.md fixes the chain in three places; the three roles
@@ -68,16 +72,46 @@ it never places go to the roles that already hold agency-wide scope:
 | :--- | :--- |
 | `super_admin` | any staff role |
 | `manager` | `owner` — in their own branch only |
-| `owner` | `agent`, `property_manager`, `marketing`, `finance` |
+| `owner` | `agent` |
 | everyone else | nobody |
 
-`portal` is refused: a portal profile must be tied to a contact with a completed contract,
-and the import DAG forbids `identity` from reading `crm` or `property_ops` to verify one.
-That flow belongs to the module that owns the contract.
+SRS 3.15.2 delegates exactly two steps ("Branch/Team Managers register Broker/Agency Owners;
+Broker/Agency Owners register Sales/Leasing Agents"). `property_manager`, `marketing` and
+`finance` are delegated to nobody, so they stay with Super Admin, whose 3.15.1 remit is
+company-wide user governance.
 
 **Credentials.** The registrar sets an initial password and the new user is confined to
 `/auth/me/` and `/auth/change-password/` until they replace it — the secret was chosen by
-someone else, so it must not unlock the CRM.
+someone else, so it must not unlock the CRM. Anyone can also self-recover through
+forgot-password.
+
+## Portal clients — the eighth role
+
+An external client (buyer, seller, rental tenant, landlord) gets a login **only** once they
+hold a completed contract (SRS 3.11.2) — never from an open lead. Staff invite them; there is
+no public signup.
+
+| inviter | may invite |
+| :--- | :--- |
+| `agent` | `BUYER`, `SELLER` |
+| `property_manager` | `TENANT`, `LANDLORD` |
+| `manager`, `owner`, `super_admin` | any type |
+| `marketing`, `finance` | nobody |
+
+**Eligibility is verified, not asserted.** A transaction counts when `CONTRACTED`,
+`PARTIALLY_PAID` or `COMPLETED`; a lease when `ACTIVE`, `EXPIRING` or `RENEWED` — not
+`PENDING_SIGNATURE`, because the SRS says *signed*. The client must also be party to that
+contract: a co-tenant qualifies, a guarantor does not.
+
+**How that works despite the DAG.** `identity` owns the portal profile but may not import
+`crm` or `property_ops`. So it *asks* and they *answer*, through signals connected in each
+app's `apps.py::ready()`. The dependency points the legal way, and `lint-imports` staying
+green is the proof. Silence is a refusal — no positive answer means no access. The same
+mechanism carries audit events to `platform`, which `identity` equally may not import.
+
+**Isolation** (SRS 3.11.6, a hard rule) runs both ways: a client sees only their own records,
+and clients never appear in the staff directory. Login re-checks eligibility every time, so
+access ends when the contract does.
 
 ## Architecture in one paragraph
 
@@ -144,14 +178,19 @@ Recorded so it is not mistaken for oversight. All of it belongs to the services 
 - **Every domain `services.py` body**, including the orchestrations §1.2 mandates:
   `mark_deal_won` → `create_lease_from_deal` → `generate_rent_schedule_invoices`;
   `upsert_activity_for_source` for viewings and inspections.
-- **Audit.** §1.3 wants `platform.services.record_event` on every sensitive mutation, but the
-  import DAG forbids `identity → platform`, so the five most audit-worthy events (register,
-  grant, revoke, deactivate, login) currently write no audit row. Resolving this needs either
-  an inverted dependency (identity emits a signal, platform receives it) or an amendment to
-  the §1.2 matrix — a decision, not an oversight.
-- **Token revocation.** `token_blacklist` is not installed and rotation is off, so
-  `is_active=False` is the only revocation mechanism; an access token stays valid for up to
-  its 60-minute lifetime.
+- **Portal *data* endpoints** — a tenant's leases, rent history and maintenance requests
+  (SRS 3.11.3–3.11.5). Those live in `crm`, `property_ops` and `finance`, none of which has
+  an API yet. `apply_scope` raises on an unregistered resource, so nothing can leak meanwhile.
+- **Audit beyond identity.** SRS 5.3's list is covered for login, failed login, registration,
+  role changes, deactivation and portal grants. Data export, document access and GPS-track
+  access arrive with the modules that own them.
+- **Real email.** Password-reset mail goes to the console backend; production needs the
+  `EMAIL_*` env vars. Nothing is dropped silently.
+- **Access-token reach.** A JWT cannot be recalled, so deactivation or logout leaves an
+  already-issued access token valid until it expires. The lifetime is 15 minutes for exactly
+  that reason.
+- **MFA and SSO.** SRS 5.3 calls MFA optional and 3.17.5 puts SSO behind a deployment
+  requirement; neither has schema support today.
 - **Two invariants that a CHECK cannot hold**, both flagged in their model docstrings:
   `Invoice.amount_paid` must equal the sum of its non-reversed allocations (the spec
   recommends a trigger), and commission split percentages must total 100 — that one needs
