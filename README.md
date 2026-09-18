@@ -1,8 +1,9 @@
 # Real Estate CRM — Backend
 
-Django + DRF + PostgreSQL (PostGIS) + Celery API for a single-company real estate CRM.
-`architecture.md` (v3.2) is the authoritative specification for the data model, the app
-boundaries, and the import DAG; this README only describes where the build has got to.
+Django + DRF + PostgreSQL (PostGIS) API for a single-company real estate CRM.
+`architecture.md` (v3.4) is the authoritative specification for the data model, the app
+boundaries, and the import DAG; this README describes where the build has got to and how to
+run it.
 
 **Scope:** one brokerage/agency (multi-branch / multi-team inside that company). **Not** a
 multi-company SaaS product. In this system, **tenant** means a **rental tenant** (lease
@@ -10,213 +11,164 @@ party), never a software customer.
 
 The frontend (React + TypeScript + Vite) lives in a separate repository.
 
-## Status: schema complete; the identity API is live
+## Status: all nine apps operational end to end
 
-An earlier Phase-1 backend shipped a working API over a flat seven-app layout. It is
-preserved at tag **`phase1-flat-layout`** and has been replaced, because architecture.md v3.2
-restructures the system around **nine apps under a strict import DAG** and changes two pieces
-of doctrine:
+The full SRS is implemented — 101 tables, 994 tests, 15/15 import-linter contracts, a clean
+OpenAPI schema, and a 17-step live-server walkthrough that exercises the whole story from a
+public inquiry to a paid invoice and a signed document. The entire Phase-2–4 build added
+exactly **one** table to the v3.3 schema (`crm_campaign_enrollment`, for per-lead drip
+state); everything else landed on tables that already existed.
 
-- **Row visibility moved from Postgres RLS to the application layer.** The old design
-  partitioned every table by a SaaS `tenant_id` and enforced it with RLS keyed on a session
-  GUC. v3.2 replaces that with role-driven scoping through
-  `identity.selectors.apply_scope` (§2). The non-superuser database role survives, but its job
-  is now to make the **append-only** tables genuinely immutable.
-- **"Tenant" was redefined** to mean a rental tenant, so the partition column is gone entirely.
-
-The rebuild follows architecture.md's own Implementation Roadmap, which is complete for
-all 98 tables. The API is now being built on top of it, app by app: **`identity` is done** —
-registration, JWT auth, and user administration, together with
-`identity.selectors.apply_scope`, the mandatory row-visibility layer every later module runs
-through. The other eight apps still have no endpoints.
-
-| Roadmap step | App | Tables | State |
-| :--- | :--- | ---: | :--- |
-| 1 | `core` — abstract bases, custom-field registry, sequences | 2 | done |
-| 2 | `identity` — company, branches, teams, users, RBAC, portal | 11 | done |
-| 3 | `contacts` — parties, roles, relationships, consent | 4 | done |
-| 4 | `inventory` — projects, buildings, properties, units, listings | 9 | done |
-| 5 | `crm` — marketing, leads, pipelines, deals, offers, transactions | 21 | done |
-| 6 | `property_ops` — leases, screening, renewals, maintenance | 10 | done |
-| 7 | `finance` — invoices, payments, commissions, statements | 16 | done |
-| 8 | `collaboration` — documents, e-sign, activities, comms, notifications | 17 | done |
-| 9 | `platform` — audit, integrations, reports | 8 | done |
-| 10 | deferred foreign keys resolved | — | done |
-| 11 | import-linter contracts in CI | — | done |
-
-**The schema pass is complete: 98 tables, 256 specified foreign keys, all built and
-verified against `architecture.md` by `tests/test_spec_coverage.py`.** Next is the services
-pass — see *What is deliberately absent* below.
-
-## The identity API
-
-| | |
+| App | What it does |
 | :--- | :--- |
-| `POST /api/v1/auth/token/` · `token/refresh/` | JWT login (throttled, audited) |
-| `POST /api/v1/auth/logout/` | revoke the refresh token |
-| `GET` / `PATCH` `/api/v1/auth/me/` | session identity: roles, scopes, what you may grant |
-| `POST /api/v1/auth/change-password/` | |
-| `POST /api/v1/auth/forgot-password/` · `reset-password/` | |
-| `POST /api/v1/users/` | **register a staff member with their role** |
-| `GET /api/v1/users/` · `{id}/` | scoped staff directory (clients excluded) |
-| `PATCH /api/v1/users/{id}/` · `DELETE` · `{id}/reactivate/` | |
-| `POST` / `DELETE` `/api/v1/users/{id}/roles/` | grant / revoke |
-| `POST /api/v1/portal-users/` | **invite a client to the portal** |
-| `GET /api/v1/portal-users/` · `{id}/` · `DELETE` | list, view, suspend |
-| `GET /api/v1/roles/` | role catalogue |
+| `core` | abstract bases, custom-field registry, `next_reference` sequences |
+| `identity` | org hierarchy, JWT auth, RBAC + runtime permission matrix, field-level permissions, portal invitations |
+| `contacts` | parties with roles, E.164/email normalisation, dedupe probe, merge, CSV import/export |
+| `inventory` | projects → properties → units, listings with a status machine, PostGIS radius search, media |
+| `crm` | lead capture→dedupe→score→route→SLA→convert, Kanban pipeline, offers/counter-offers, checklist-gated transactions, matching engine, drip campaigns, landing pages, saved-search alerts, GPS field tracking, AI insights |
+| `property_ops` | lease lifecycle over a GiST no-overlap exclusion, rent schedules, deposits, applications/screening, renewals, inspections, maintenance → vendor work orders |
+| `finance` | invoices, payments with delta allocations, PDC cheques, marginal tiered commissions with splits, installment plans, collection-basis owner statements, reconciliation, append-only ledger |
+| `collaboration` | documents with grants and in-place versions, built-in token e-sign, recurring tasks + calendar, threads/messages/call logs/notes, templates, notifications with quiet hours |
+| `platform` | audit trail, portal sync adapters, HMAC-signed webhooks in and out, saved reports + schedules, dashboard snapshots |
 
-**Who may register whom.** architecture.md fixes the chain in three places; the three roles
-it never places go to the roles that already hold agency-wide scope:
+Money is written only by `finance.services`; §1.2's orchestrations are real
+(`mark_deal_won` → transaction + commission; `activate_lease` → rent schedule → invoices;
+`complete_work_order` → billable expense on the owner statement).
 
-| registrar | may create |
-| :--- | :--- |
-| `super_admin` | any staff role |
-| `manager` | `owner` — in their own branch only |
-| `owner` | `agent` |
-| everyone else | nobody |
+## API surface
 
-SRS 3.15.2 delegates exactly two steps ("Branch/Team Managers register Broker/Agency Owners;
-Broker/Agency Owners register Sales/Leasing Agents"). `property_manager`, `marketing` and
-`finance` are delegated to nobody, so they stay with Super Admin, whose 3.15.1 remit is
-company-wide user governance.
+Swagger at `/api/docs/` is the authoritative reference (zero-warning `drf-spectacular`
+schema). Roughly:
 
-**Credentials.** The registrar sets an initial password and the new user is confined to
-`/auth/me/` and `/auth/change-password/` until they replace it — the secret was chosen by
-someone else, so it must not unlock the CRM. Anyone can also self-recover through
-forgot-password.
+- **`/api/v1/`** — everything above, per app: `auth/*`, `users`, `contacts`, `properties`,
+  `listings`, `leads` (+`/matches/`, `/ai-insights/`), `deals` (+board, `/move/`), `offers`,
+  `transactions`, `closing-checklists`, `campaigns`, `leases` (+`/activate/`,
+  `/rent-schedule/`), `maintenance-requests`, `work-orders`, `invoices`, `payments`,
+  `cheques`, `commissions`, `owner-statements`, `documents`, `esign/envelopes`,
+  `activities` (+`/calendar/`), `threads`, `messages`, `notifications`, `dashboard`
+  (+`?as_of=` snapshots), `saved-reports`, `connections`, `webhooks`, and the admin
+  surfaces `permissions` / `role-permissions` / `field-permissions` / `custom-fields`.
+- **`/api/public/`** — unauthenticated, rate-limited, for the public website: `listings/`
+  (ACTIVE rows on a strict whitelist card), `inquiries/` (honeypot, enumeration-proof 202s,
+  full capture pipeline), `pages/{slug}/` (+`/submit/`), `chat/qualify/`,
+  `esign/{token}/` signing pages, `webhooks/{id}/` (HMAC-verified inbound).
 
-## Portal clients — the eighth role
+Every external service sits behind a settings-selected mock adapter — SMS/WhatsApp/push
+gateways, portal syndication, lead feeds, the AI provider, webhook transport.
+`third-part-needed.md` documents each seam and the real provider that replaces it.
 
-An external client (buyer, seller, rental tenant, landlord) gets a login **only** once they
-hold a completed contract (SRS 3.11.2) — never from an open lead. Staff invite them; there is
-no public signup.
+## Run it
 
-| inviter | may invite |
-| :--- | :--- |
-| `agent` | `BUYER`, `SELLER` |
-| `property_manager` | `TENANT`, `LANDLORD` |
-| `manager`, `owner`, `super_admin` | any type |
-| `marketing`, `finance` | nobody |
+```bash
+docker compose up -d db redis minio backend
+docker compose exec backend python manage.py migrate
+docker compose exec backend python manage.py bootstrap_e2e   # prints a super-admin login
+```
 
-**Eligibility is verified, not asserted.** A transaction counts when `CONTRACTED`,
-`PARTIALLY_PAID` or `COMPLETED`; a lease when `ACTIVE`, `EXPIRING` or `RENEWED` — not
-`PENDING_SIGNATURE`, because the SRS says *signed*. The client must also be party to that
-contract: a co-tenant qualifies, a guarantor does not.
+`bootstrap_e2e` is idempotent: a company, branch, team, one super-admin
+(`e2e-admin@walkthrough.test` / `e2e-walkthrough-pass-1`) and the property type the
+walkthrough needs. `createsuperuser` works too (it attaches the `super_admin` role).
+File uploads need the `crm-media` bucket in MinIO once — create it at
+http://localhost:9001 (minioadmin/minioadmin), or the walkthrough's first upload error
+tells you.
 
-**How that works despite the DAG.** `identity` owns the portal profile but may not import
-`crm` or `property_ops`. So it *asks* and they *answer*, through signals connected in each
-app's `apps.py::ready()`. The dependency points the legal way, and `lint-imports` staying
-green is the proof. Silence is a refusal — no positive answer means no access. The same
-mechanism carries audit events to `platform`, which `identity` equally may not import.
+- Swagger: http://localhost:8000/api/docs/ · ReDoc: `/api/redoc/`
+- Health: http://localhost:8000/healthz/ · Django admin: `/admin/`
 
-**Isolation** (SRS 3.11.6, a hard rule) runs both ways: a client sees only their own records,
-and clients never appear in the staff directory. Login re-checks eligibility every time, so
-access ends when the contract does.
+The whole system in one command, against the live server:
+
+```bash
+python backend/scripts/e2e_walkthrough.py     # 17 steps, stdlib only, stops on first failure
+```
+
+The `worker`/`beat` compose services exist but are unused: recurring work is **idempotent
+management commands** instead of Celery (the deployment target blocks background workers).
+Point cron / Render jobs at whichever cadence suits:
+
+`sweep_sla`, `generate_rent_invoices`, `sweep_overdue`, `sweep_lease_expiry`,
+`sweep_reminders`, `sweep_esign`, `sweep_offers`, `run_drip`, `run_saved_search_alerts`,
+`run_sync`, `retry_webhooks`, `run_report_schedules`, `build_dashboard_snapshots`.
+
+Each is proven run-twice-changes-nothing by its tests, so overlapping or repeated runs are
+safe.
+
+Running without Docker: copy `backend/.env.example` to `backend/.env`, point it at local
+Postgres+PostGIS, Redis and an S3-compatible store, then
+`pip install -r backend/requirements-dev.txt` and `python backend/manage.py runserver`.
+
+## Test & lint
+
+```bash
+docker compose run --rm backend pytest                                        # 994 tests
+docker compose run --rm backend ruff check .
+docker compose run --rm backend lint-imports                                  # 15/15 kept
+docker compose run --rm backend python manage.py makemigrations --check --dry-run
+docker compose run --rm backend python manage.py spectacular --file /dev/null # 0 warnings
+```
+
+The suite covers the schema against the spec (`tests/test_spec_coverage.py` parses
+`architecture.md` itself), the database invariants, append-only enforcement as the
+non-superuser role, every service state machine, row scoping per resource (including
+portal-client and wrong-branch refusals), the money arithmetic, and every management
+command run twice.
 
 ## Architecture in one paragraph
 
 Nine Django apps in a fixed dependency order —
 `core → identity → {contacts, inventory} → {crm, property_ops} → finance → {collaboration, platform}`.
 Apps never talk over HTTP internally; they communicate through lazy FK string references,
-a public `services.py` (the only module another app may import to *write*), a public
-`selectors.py` (reads), and Celery tasks. An app's `api/` package is private to it. Money is
-written **only** by `finance.services`. Four tables are append-only and have `UPDATE`/`DELETE`
-revoked at the database-role level. `lint-imports` enforces the boundaries in CI.
+a public `services.py` (the only module another app may import to *write*) and a public
+`selectors.py` (reads). An app's `api/` package is private to it. Satellites
+(`collaboration`, `platform`) never call domain write services — inbound events reach a
+domain through signals it defines (`inbound_lead_received`, `verify_portal_eligibility`),
+and domain events reach `platform`'s audit/webhook fan-out the same way. Row visibility is
+`identity.selectors.apply_scope`, a per-resource registry each app fills in
+`AppConfig.ready()`; an unregistered resource raises rather than leaking. Four tables are
+append-only with `UPDATE`/`DELETE` revoked at the database-role level. `lint-imports`
+enforces all of it in CI.
 
-## Run it
+## Who may register whom
 
-```bash
-docker compose up -d          # Postgres+PostGIS, Redis, MinIO, API, Celery worker/beat
-docker compose exec backend python manage.py migrate
-```
+`super_admin` creates any staff role; `manager` creates `owner` (own branch only); `owner`
+creates `agent`; nobody else registers anyone. The registrar sets an initial password and
+the new user is confined to `/auth/me/` and `/auth/change-password/` until they replace it.
 
-- API docs: http://localhost:8000/api/docs/ (Swagger) · http://localhost:8000/api/redoc/
-- Health check: http://localhost:8000/healthz/
-- Django admin: http://localhost:8000/admin/
+Portal clients (buyer, seller, rental tenant, landlord) get a login **only** against a
+completed contract — verified through signals, never asserted, and re-checked at every
+login. `agent` invites buyers/sellers, `property_manager` invites tenants/landlords,
+management invites anyone, `marketing`/`finance` nobody. Isolation runs both ways: clients
+see only their own records, and never appear in the staff directory.
 
-**Bootstrap.** `createsuperuser` now attaches the `super_admin` role, so the first
-administrator is usable immediately:
+## Mocked or not built
 
-```bash
-docker compose exec backend python manage.py createsuperuser
-```
-
-Create a Company and Branch in Django admin (there is no branches API yet), then register
-everyone else through `POST /api/v1/users/`. There is no demo seed command.
-
-Running without Docker: copy `backend/.env.example` to `backend/.env`, point it at a local
-Postgres+PostGIS instance and Redis, then `pip install -r backend/requirements-dev.txt` and
-`python backend/manage.py runserver`.
-
-## Test & lint
-
-```bash
-docker compose run --rm backend pytest        # schema, DB constraints, append-only, geo
-docker compose run --rm backend ruff check .
-docker compose run --rm backend lint-imports  # architecture.md §1.2 import DAG
-```
-
-The suite is deliberately schema-level while the API is absent. It asserts that:
-
-- every model's `db_table` matches the spec's logical name, and no migration is unwritten;
-- **the built schema covers `architecture.md` in full** — every table and all 256 declared
-  foreign keys, checked by parsing the spec itself (`tests/test_spec_coverage.py`);
-- each database-level invariant actually rejects bad rows: overlapping leases, a `LOST` deal
-  with no reason, a commission hanging off both a transaction and a lease, a reconciliation
-  claiming to balance while showing a difference;
-- the four append-only tables reject `UPDATE`/`DELETE` as the app role — and that the app
-  role is not a superuser, since a superuser would make that check pass vacuously;
-- PostGIS radius search and JSONB containment queries work end to end.
-
-## What is deliberately absent
-
-Recorded so it is not mistaken for oversight. All of it belongs to the services pass:
-
-- **Domain endpoints.** `apply_scope` exists and is enforced for `user`, but every other
-  resource is unregistered — deliberately, since it raises rather than silently returning an
-  unfiltered queryset. Each module registers its anchors alongside its own endpoints.
-- **Every domain `services.py` body**, including the orchestrations §1.2 mandates:
-  `mark_deal_won` → `create_lease_from_deal` → `generate_rent_schedule_invoices`;
-  `upsert_activity_for_source` for viewings and inspections.
-- **Portal *data* endpoints** — a tenant's leases, rent history and maintenance requests
-  (SRS 3.11.3–3.11.5). Those live in `crm`, `property_ops` and `finance`, none of which has
-  an API yet. `apply_scope` raises on an unregistered resource, so nothing can leak meanwhile.
-- **Audit beyond identity.** SRS 5.3's list is covered for login, failed login, registration,
-  role changes, deactivation and portal grants. Data export, document access and GPS-track
-  access arrive with the modules that own them.
-- **Real email.** Password-reset mail goes to the console backend; production needs the
-  `EMAIL_*` env vars. Nothing is dropped silently.
-- **Access-token reach.** A JWT cannot be recalled, so deactivation or logout leaves an
-  already-issued access token valid until it expires. The lifetime is 15 minutes for exactly
-  that reason.
-- **MFA and SSO.** SRS 5.3 calls MFA optional and 3.17.5 puts SSO behind a deployment
-  requirement; neither has schema support today.
-- **Two invariants that a CHECK cannot hold**, both flagged in their model docstrings:
-  `Invoice.amount_paid` must equal the sum of its non-reversed allocations (the spec
-  recommends a trigger), and commission split percentages must total 100 — that one needs
-  sibling rows, so it is enforced on approval.
-- Reference-code generation through `core_sequence` with `SELECT … FOR UPDATE`.
-- The API layer, JWT routes, Swagger, and a seed command.
-- Porting domain logic from tag `phase1-flat-layout`: contact dedupe/merge, lead
-  scoring/routing/capture/convert with the SLA sweep, the listing status state machine, deal
-  `move_stage`, and the Kanban board.
+- **Every external provider is a mock adapter** behind a settings key — see
+  `third-part-needed.md` for the 20 integrations, their env vars, and cut-over steps.
+  Email is real (Django mail; console backend in dev).
+- **AI** is the deterministic rule-based provider (`AI_PROVIDER=mock`); the Claude API
+  provider is documented, not wired.
+- **PDF/XLSX export** are refused with a clear message until `weasyprint`/`openpyxl` are
+  added; CSV is real.
+- **MFA and SSO** have no schema support (optional per SRS 5.3 / 3.17.5).
 
 ## A note on the database role
 
-The app connects as **`crm_app`**, deliberately **not** a superuser. `apps/core/db_policy.py`
-revokes `UPDATE`/`DELETE` on `finance_account_entry`, `platform_audit_event`,
-`collaboration_signature_event`, and `crm_agent_location_point` from exactly this role — and a
-superuser would ignore the revoke, making those tables mutable and the immutability tests
-pass vacuously. The role name must match across `docker-compose.yml`,
+The app connects as **`crm_app`**, deliberately **not** a superuser.
+`apps/core/db_policy.py` revokes `UPDATE`/`DELETE` on `finance_account_entry`,
+`platform_audit_event`, `collaboration_signature_event`, and `crm_agent_location_point`
+from exactly this role — a superuser would ignore the revoke and make the immutability
+tests pass vacuously. The role name must match across `docker-compose.yml`,
 `deploy/postgres-init.sql`, CI, and `POSTGRES_USER`, because `db_policy` reads it from
 settings at migrate time.
 
 ## Layout
 
 ```
-architecture.md         The specification. Read the owning section before touching an app.
+architecture.md         The specification (v3.4). Read the owning section before touching an app.
 architecture-review.md  The review that produced v3.2's corrections.
+third-part-needed.md    Every mocked integration: seam, real provider, env vars, cut-over.
+documentation.md        Daily progress log.
 backend/                Django project (config/) + the nine apps under apps/
+backend/scripts/        e2e_walkthrough.py — the live-server smoke story
 deploy/                 postgres-init.sql (app role + PostGIS bootstrap)
 ```
 
