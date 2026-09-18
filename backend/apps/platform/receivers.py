@@ -12,6 +12,7 @@ Connected in `apps/platform/apps.py::ready()`.
 """
 from apps.contacts import signals as contact_signals
 from apps.identity import signals
+from apps.inventory import signals as inventory_signals
 
 from .models import AuditEvent
 from .services import record_event
@@ -191,7 +192,34 @@ def on_contacts_imported(sender, *, actor, created, skipped, invalid, filename, 
     )
 
 
+# --- inventory (SRS 3.3.4) ----------------------------------------------------------------
+
+
+def on_status_changed(sender, *, target, from_status, to_status, actor, reason=None, **kwargs):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type=target._meta.model_name.upper(),
+        entity_id=target.pk,
+        actor=actor,
+        old_values={"status": from_status},
+        new_values={"status": to_status, "reason": reason},
+    )
+
+
+def on_listing_published(sender, *, listing, actor, from_status, to_status, **kwargs):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type="LISTING",
+        entity_id=listing.pk,
+        actor=actor,
+        old_values={"status": from_status},
+        new_values={"status": to_status, "reference_code": listing.reference_code},
+    )
+
+
 _WIRING = (
+    (inventory_signals.status_changed, on_status_changed),
+    (inventory_signals.listing_published, on_listing_published),
     (contact_signals.contacts_merged, on_contacts_merged),
     (contact_signals.contact_deleted, on_contact_deleted),
     (contact_signals.contacts_exported, on_contacts_exported),

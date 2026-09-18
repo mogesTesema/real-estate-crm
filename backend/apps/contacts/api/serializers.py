@@ -7,26 +7,10 @@ services module, not by convention here.
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from apps.identity.models import User
+from apps.core.serializers import UserSummarySerializer
 
 from ..models import Consent, Contact, ContactRelationship, ContactRole
 from ..services import IMPORTABLE_FIELDS
-
-
-class AgentSummarySerializer(serializers.ModelSerializer):
-    """The assigned agent, as much of them as a contact record needs.
-
-    Defined here rather than imported from `identity.api.serializers`: §1.2 makes every app's
-    `api` package private, and `lint-imports` enforces it. Duplicating four field names is the
-    price of that boundary, and a cheap one — the alternative is every app reaching into
-    every other app's HTTP layer.
-    """
-
-    full_name = serializers.CharField(read_only=True)
-
-    class Meta:
-        model = User
-        fields = ("id", "full_name", "email")
 
 
 class ContactRoleSerializer(serializers.ModelSerializer):
@@ -80,7 +64,7 @@ class ContactSummarySerializer(serializers.ModelSerializer):
 class ContactSerializer(serializers.ModelSerializer):
     display_name = serializers.CharField(source="__str__", read_only=True)
     roles = serializers.SerializerMethodField()
-    assigned_agent = AgentSummarySerializer(read_only=True)
+    assigned_agent = UserSummarySerializer(read_only=True)
     consents = ConsentSerializer(many=True, read_only=True)
 
     class Meta:

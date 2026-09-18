@@ -326,6 +326,10 @@ class Listing(SoftDeleteModel):
         OFF_MARKET = "OFF_MARKET", "Off market"
         EXPIRED = "EXPIRED", "Expired"
 
+    #: Statuses in which a listing is still on the market. Used to stop a property being
+    #: archived out from under a live mandate, and to scope the public-facing feeds.
+    LIVE_STATUSES = ("ACTIVE", "UNDER_OFFER", "RESERVED")
+
     property = models.ForeignKey(Property, on_delete=models.PROTECT, related_name="listings")
     unit = models.ForeignKey(
         Unit, null=True, blank=True, on_delete=models.PROTECT, related_name="listings"

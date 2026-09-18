@@ -22,7 +22,7 @@ def register_resources():
     from apps.core.choices import ScopedEntityType
     from apps.identity.models import Role
 
-    from .models import Listing, Media, Property
+    from .models import Listing, Media, Property, Unit
 
     scope = Role.DataScope
 
@@ -65,7 +65,17 @@ def register_resources():
         },
     )
 
-    # The one child resource with its own registration. Media has three nullable parents —
+    # Units inherit their property's visibility — §2's "child records inherit scope from
+    # their parent". They get a registration rather than being read only through the property
+    # endpoint because a unit has its own detail page and its own status machine.
+    register(
+        "unit",
+        model=Unit,
+        entity_type=None,
+        scopes={s: nested("property", "property") for s in scope.values},
+    )
+
+    # Media has three nullable parents —
     # property, unit, listing — so it cannot inherit through a single path, and it needs its
     # own endpoint because uploads and re-ordering happen against the gallery directly.
     register(
