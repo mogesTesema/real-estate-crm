@@ -4,6 +4,10 @@ on:
   schedule:
     - cron: '*/30 * * * *'
   workflow_dispatch:
+  # With main as the default branch, GitHub neither runs the cron above nor reliably
+  # shows the Run-workflow button for this branch — so any push to mirror also syncs.
+  push:
+    branches: [mirror]
 
 # Needed so GITHUB_TOKEN may push to this repo.
 permissions:
