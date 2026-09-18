@@ -166,3 +166,227 @@ class ChequeReplaceSerializer(serializers.Serializer):
     cheque_number = serializers.CharField()
     amount = serializers.DecimalField(max_digits=15, decimal_places=2)
     cheque_date = serializers.DateField()
+
+
+# --- Phase C ---------------------------------------------------------------------------------
+
+
+class CommissionPlanSerializer(serializers.ModelSerializer):
+    class Meta:
+        from ..models import CommissionPlan
+
+        model = CommissionPlan
+        fields = "__all__"
+        read_only_fields = ("id", "created_at", "updated_at")
+
+
+class CommissionSplitSerializer(serializers.Serializer):
+    recipient_type = serializers.CharField()
+    recipient_user = serializers.UUIDField(required=False, allow_null=True)
+    recipient_contact = serializers.UUIDField(required=False, allow_null=True)
+    percentage = serializers.DecimalField(max_digits=7, decimal_places=4)
+
+
+class CommissionSerializer(serializers.ModelSerializer):
+    splits = serializers.SerializerMethodField()
+
+    class Meta:
+        from ..models import Commission
+
+        model = Commission
+        fields = "__all__"
+        read_only_fields = (
+            "id", "status", "gross_commission", "tax_amount", "net_commission",
+            "approved_by", "approved_at", "paid_at", "created_at", "updated_at",
+        )
+
+    @extend_schema_field(serializers.ListField(child=serializers.DictField()))
+    def get_splits(self, obj):
+        return [
+            {
+                "recipient_type": split.recipient_type,
+                "recipient_user": (
+                    str(split.recipient_user_id) if split.recipient_user_id else None
+                ),
+                "recipient_contact": (
+                    str(split.recipient_contact_id) if split.recipient_contact_id else None
+                ),
+                "percentage": str(split.percentage),
+                "amount": str(split.amount),
+            }
+            for split in obj.splits.all()
+        ]
+
+
+class CommissionCreateSerializer(serializers.Serializer):
+    """Exactly one of `transaction`/`lease` — the model's XOR, surfaced."""
+
+    transaction = serializers.UUIDField(required=False, allow_null=True)
+    lease = serializers.UUIDField(required=False, allow_null=True)
+    plan = serializers.UUIDField(required=False, allow_null=True)
+    agent = serializers.UUIDField(required=False, allow_null=True)
+    deductions = serializers.DecimalField(
+        max_digits=15, decimal_places=2, required=False, default=0
+    )
+    net_amount = serializers.DecimalField(
+        max_digits=15, decimal_places=2, required=False, allow_null=True
+    )
+
+    def validate(self, attrs):
+        if bool(attrs.get("transaction")) == bool(attrs.get("lease")):
+            raise serializers.ValidationError(
+                "A commission comes from exactly one of a transaction or a lease."
+            )
+        return attrs
+
+
+class SetSplitsSerializer(serializers.Serializer):
+    splits = CommissionSplitSerializer(many=True)
+
+
+class ReasonSerializer(serializers.Serializer):
+    reason = serializers.CharField()
+
+
+class PayCommissionSerializer(serializers.Serializer):
+    account = serializers.UUIDField()
+
+
+class CommissionInvoiceSerializer(serializers.Serializer):
+    contact = serializers.UUIDField()
+    due_date = serializers.DateField()
+
+
+class MilestoneInputSerializer(serializers.Serializer):
+    label = serializers.CharField()
+    due_date = serializers.DateField()
+    amount = serializers.DecimalField(
+        max_digits=15, decimal_places=2, required=False, allow_null=True
+    )
+    percentage = serializers.DecimalField(
+        max_digits=7, decimal_places=4, required=False, allow_null=True
+    )
+    sort_order = serializers.IntegerField(required=False)
+
+
+class InstallmentPlanSerializer(serializers.ModelSerializer):
+    milestones = serializers.SerializerMethodField()
+
+    class Meta:
+        from ..models import InstallmentPlan
+
+        model = InstallmentPlan
+        fields = "__all__"
+        read_only_fields = ("id", "status", "created_at", "updated_at")
+
+    @extend_schema_field(serializers.ListField(child=serializers.DictField()))
+    def get_milestones(self, obj):
+        return [
+            {
+                "id": str(m.pk), "label": m.label, "due_date": str(m.due_date),
+                "amount": str(m.amount), "status": m.status,
+                "invoice": str(m.invoice_id) if m.invoice_id else None,
+            }
+            for m in obj.milestones.all()
+        ]
+
+
+class InstallmentPlanCreateSerializer(serializers.Serializer):
+    transaction = serializers.UUIDField()
+    name = serializers.CharField()
+    currency = serializers.CharField(max_length=3)
+    total_amount = serializers.DecimalField(max_digits=15, decimal_places=2)
+    milestones = MilestoneInputSerializer(many=True)
+
+
+class MilestoneActionSerializer(serializers.Serializer):
+    milestone = serializers.UUIDField()
+    contact = serializers.UUIDField(required=False, allow_null=True)
+    due_date = serializers.DateField(required=False, allow_null=True)
+    reason = serializers.CharField(required=False, allow_blank=True)
+
+
+class ExpenseSerializer(serializers.ModelSerializer):
+    class Meta:
+        from ..models import Expense
+
+        model = Expense
+        fields = "__all__"
+        read_only_fields = (
+            "id", "expense_number", "status", "approved_by", "owner_statement",
+            "created_at", "updated_at",
+        )
+
+
+class ExpenseCreateSerializer(serializers.Serializer):
+    category = serializers.CharField()
+    description = serializers.CharField()
+    amount = serializers.DecimalField(max_digits=15, decimal_places=2)
+    expense_date = serializers.DateField()
+    tax_amount = serializers.DecimalField(
+        max_digits=15, decimal_places=2, required=False, default=0
+    )
+    property = serializers.UUIDField(required=False, allow_null=True)
+    lease = serializers.UUIDField(required=False, allow_null=True)
+    vendor_contact = serializers.UUIDField(required=False, allow_null=True)
+    account = serializers.UUIDField(required=False, allow_null=True)
+    is_billable_to_owner = serializers.BooleanField(default=False)
+
+
+class OwnerStatementSerializer(serializers.ModelSerializer):
+    lines = serializers.SerializerMethodField()
+
+    class Meta:
+        from ..models import OwnerStatement
+
+        model = OwnerStatement
+        fields = "__all__"
+        read_only_fields = (
+            "id", "statement_number", "status", "gross_rent_collected",
+            "management_fees", "expenses_total", "other_deductions", "net_payable",
+            "issued_at", "paid_at", "created_at", "updated_at",
+        )
+
+    @extend_schema_field(serializers.ListField(child=serializers.DictField()))
+    def get_lines(self, obj):
+        return [
+            {
+                "line_type": line.line_type, "description": line.description,
+                "amount": str(line.amount), "occurred_on": str(line.occurred_on or ""),
+                "reference_type": line.reference_type,
+            }
+            for line in obj.lines.all()
+        ]
+
+
+class StatementGenerateSerializer(serializers.Serializer):
+    owner_contact = serializers.UUIDField()
+    period_start = serializers.DateField()
+    period_end = serializers.DateField()
+    property = serializers.UUIDField(required=False, allow_null=True)
+
+
+class StatementAdjustmentSerializer(serializers.Serializer):
+    description = serializers.CharField()
+    amount = serializers.DecimalField(max_digits=15, decimal_places=2)
+    line_type = serializers.CharField(required=False, default="DEDUCTION")
+
+
+class ReconciliationSerializer(serializers.ModelSerializer):
+    class Meta:
+        from ..models import Reconciliation
+
+        model = Reconciliation
+        fields = "__all__"
+        read_only_fields = (
+            "id", "status", "closing_balance_system", "difference",
+            "reconciled_by", "reconciled_at", "created_at", "updated_at",
+        )
+
+
+class ReconciliationCreateSerializer(serializers.Serializer):
+    account = serializers.UUIDField()
+    period_start = serializers.DateField()
+    period_end = serializers.DateField()
+    opening_balance = serializers.DecimalField(max_digits=15, decimal_places=2)
+    closing_balance_statement = serializers.DecimalField(max_digits=15, decimal_places=2)

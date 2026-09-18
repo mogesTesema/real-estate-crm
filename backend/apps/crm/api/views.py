@@ -453,6 +453,32 @@ class DealViewSet(
             _translate(exc)
         return Response(DealPropertySerializer(link).data, status=status.HTTP_201_CREATED)
 
+    @action(detail=True, methods=["post"], url_path="create-lease")
+    def create_lease(self, request, pk=None):
+        """§1.2's letting hand-off: a won RENTAL deal becomes a DRAFT lease with the property
+        manager's explicit commercial terms — never derived from the deal's estimate."""
+        from apps.property_ops import services as property_ops_services
+
+        deal = self.get_object()
+        try:
+            lease = property_ops_services.create_lease_from_deal(
+                deal=deal,
+                actor=request.user,
+                transaction=deal.transactions.exclude(status="CANCELLED").first(),
+                start_date=request.data.get("start_date"),
+                end_date=request.data.get("end_date"),
+                rent_amount=request.data.get("rent_amount"),
+                billing_frequency=request.data.get("billing_frequency", "MONTHLY"),
+                security_deposit=request.data.get("security_deposit", 0),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(
+            {"lease_id": str(lease.pk), "reference_code": lease.reference_code,
+             "status": lease.status},
+            status=status.HTTP_201_CREATED,
+        )
+
     @extend_schema(
         parameters=[
             OpenApiParameter("pipeline", str, description="Pipeline id; defaults to the default."),

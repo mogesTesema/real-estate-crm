@@ -228,6 +228,11 @@ SPECTACULAR_SETTINGS = {
         # Notification.type and NotificationPreference.notification_type serialize the same
         # choice set under two field names; one canonical component name for both.
         "NotificationTypeEnum": "apps.collaboration.models.Notification.Type",
+        # Application.background_check_status and credit_check_status share one choice set;
+        # Lead.Priority and MaintenanceRequest.Priority collide on the field name.
+        "ScreeningCheckStatusEnum": "apps.property_ops.models.Application.CheckStatus",
+        "LeadPriorityEnum": "apps.crm.models.Lead.Priority",
+        "MaintenancePriorityEnum": "apps.property_ops.models.MaintenanceRequest.Priority",
     },
 }
 

@@ -706,6 +706,11 @@ def move_stage(deal, stage, *, actor, reason, next_action=None):
         deal=deal, from_stage=previous, to_stage=stage, changed_by=actor,
         reason=reason, next_action=next_action,
     )
+    if stage.is_won:
+        # §1.2: "Sale deal won: crm.services.mark_deal_won → finance". Same transaction as
+        # the stage save; idempotent and self-degrading, so re-winning a churned deal or a
+        # missing commission plan can never fail the move itself.
+        mark_deal_won(deal, actor=actor)
     if (next_action or "").strip() and not terminal:
         # SRS 3.4.5 — the mandatory next action becomes a real task on the owner's list,
         # not a string that scrolls away in the stage history.
@@ -731,6 +736,89 @@ def update_deal(deal, *, actor, **fields):
     deal.updated_by = actor
     deal.save()
     return deal
+
+
+@transaction.atomic
+def mark_deal_won(deal, *, actor, gross_amount=None, commission_plan=None):
+    """§1.2's orchestration keystone: a won deal becomes a Transaction, and for a sale, a
+    commission. Called from `move_stage`'s is_won branch in the SAME transaction — never a
+    post_save signal, which §1.2 forbids for money.
+
+    Three properties make it safe to fire on every stage churn through a won stage:
+    * **Idempotent** — a deal with a live transaction returns it untouched (a deal dragged
+      out of Won and back in must not mint a second sale).
+    * **Degrading** — commission-plan ambiguity logs and defers rather than failing; a stage
+      move must never break over back-office configuration (create the commission later via
+      POST /commissions with an explicit plan).
+    * **Refusing quietly** — a deal with no linked property returns None with a warning:
+      `crm_transaction.property` is NOT NULL, and blocking the move over a missing link
+      would hold a sale hostage to data entry. The gap is visible in the audit trail.
+
+    For LETTING deals this creates the RENTAL transaction only; the lease follows via the
+    explicit `POST /deals/{id}/create-lease/` — lease terms are a property manager's
+    decision, not something to derive from a deal's estimate.
+    """
+    from apps.core.services import next_reference
+
+    from .models import DealProperty, Transaction
+
+    existing = deal.transactions.exclude(status=Transaction.Status.CANCELLED).first()
+    if existing is not None:
+        return existing
+
+    primary = (
+        DealProperty.objects.filter(deal=deal)
+        .order_by("-is_primary", "created_at")
+        .select_related("property")
+        .first()
+    )
+    if primary is None:
+        logger.warning(
+            "mark_deal_won: deal %s has no linked property; transaction deferred.", deal.pk
+        )
+        return None
+
+    rental = str(deal.deal_type).upper() in ("RENT", "RENTAL", "RENT_IN", "RENT_OUT",
+                                             "LEASE", "LEASING")
+    accepted_offer = (
+        deal.offers.filter(status="ACCEPTED").order_by("-responded_at").first()
+        if hasattr(deal, "offers")
+        else None
+    )
+    amount = (
+        gross_amount
+        if gross_amount is not None
+        else (accepted_offer.amount if accepted_offer else deal.estimated_value)
+    )
+
+    txn = Transaction.objects.create(
+        deal=deal,
+        property=primary.property,
+        transaction_type=(
+            Transaction.TransactionType.RENTAL if rental
+            else Transaction.TransactionType.SALE
+        ),
+        reference_code=next_reference("transaction", prefix="TXN"),
+        gross_amount=amount,
+        currency=deal.currency,
+        transaction_date=timezone.localdate(),
+        status=Transaction.Status.PENDING,
+        created_by=actor,
+        updated_by=actor,
+    )
+
+    if not rental:
+        from apps.finance import services as finance_services
+
+        try:
+            finance_services.create_commission_for_transaction(
+                actor=actor, transaction_obj=txn, plan=commission_plan
+            )
+        except ValidationError as exc:
+            logger.warning(
+                "mark_deal_won: commission deferred for deal %s: %s", deal.pk, exc
+            )
+    return txn
 
 
 @transaction.atomic

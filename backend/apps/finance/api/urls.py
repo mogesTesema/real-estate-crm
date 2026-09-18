@@ -9,8 +9,14 @@ from .views import (
     AccountEntryViewSet,
     AccountViewSet,
     ChequeViewSet,
+    CommissionPlanViewSet,
+    CommissionViewSet,
+    ExpenseViewSet,
+    InstallmentPlanViewSet,
     InvoiceViewSet,
+    OwnerStatementViewSet,
     PaymentViewSet,
+    ReconciliationViewSet,
 )
 
 router = DefaultRouter()
@@ -19,5 +25,11 @@ router.register("account-entries", AccountEntryViewSet, basename="account-entry"
 router.register("invoices", InvoiceViewSet, basename="invoice")
 router.register("payments", PaymentViewSet, basename="payment")
 router.register("cheques", ChequeViewSet, basename="cheque")
+router.register("commission-plans", CommissionPlanViewSet, basename="commission-plan")
+router.register("commissions", CommissionViewSet, basename="commission")
+router.register("installment-plans", InstallmentPlanViewSet, basename="installment-plan")
+router.register("expenses", ExpenseViewSet, basename="expense")
+router.register("owner-statements", OwnerStatementViewSet, basename="owner-statement")
+router.register("reconciliations", ReconciliationViewSet, basename="reconciliation")
 
 urlpatterns = [path("", include(router.urls))]
