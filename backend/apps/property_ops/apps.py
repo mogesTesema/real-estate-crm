@@ -13,7 +13,8 @@ class PropertyOpsConfig(AppConfig):
         (architecture.md §1.2), so the dependency is inverted and this app registers with it.
         """
         from . import receivers
-        from .scoping import register_resources
+        from .scoping import register_phase_b_resources, register_resources
 
         receivers.connect()
         register_resources()
+        register_phase_b_resources()

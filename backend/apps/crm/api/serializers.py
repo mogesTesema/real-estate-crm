@@ -6,7 +6,7 @@ Write serializers validate shape only; the lead engine and the deal state machin
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from apps.core.serializers import UserSummarySerializer
+from apps.core.serializers import ContactSummarySerializer, UserSummarySerializer
 
 from ..models import (
     Deal,
@@ -27,19 +27,6 @@ class LeadSourceSerializer(serializers.ModelSerializer):
     class Meta:
         model = LeadSource
         fields = ("id", "name", "source_type", "description", "is_active")
-
-
-class ContactSummarySerializer(serializers.Serializer):
-    """The contact on a lead or deal card.
-
-    Hand-written rather than imported from `contacts.api.serializers`: §1.2 makes every app's
-    `api` package private and `lint-imports` enforces it.
-    """
-
-    id = serializers.UUIDField(read_only=True)
-    display_name = serializers.CharField(source="__str__", read_only=True)
-    email = serializers.CharField(read_only=True)
-    phone = serializers.CharField(read_only=True)
 
 
 class LeadLocationSerializer(serializers.ModelSerializer):

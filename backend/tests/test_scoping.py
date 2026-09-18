@@ -107,8 +107,10 @@ class TestEdgeCases:
 
     def test_an_unregistered_resource_raises(self, agent):
         """A silent fallback to the unfiltered queryset is how scoping layers stop scoping."""
+        # A name no phase will ever register — "invoice" and "deal" both eventually
+        # became real resources and broke this test's premise twice.
         with pytest.raises(KeyError):
-            apply_scope(User.objects.all(), agent, "invoice")
+            apply_scope(User.objects.all(), agent, "definitely_not_a_resource")
 
 
 class TestMultipleRoles:

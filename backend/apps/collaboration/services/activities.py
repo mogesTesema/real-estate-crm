@@ -116,3 +116,35 @@ def create_task_for_stage_move(*, deal, subject, actor):
     except Exception:  # noqa: BLE001 - courtesy artefact, never blocks the move
         logger.exception("Stage-move task creation failed for deal=%s", deal.pk)
         return None
+
+
+def create_task_for_lease_expiry(lease):
+    """A renewal follow-up task on the property manager's list (SRS 3.5.5, 3.12.2).
+
+    Same never-raises contract as the stage-move task: a sweep must not die on one row.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        with transaction.atomic():
+            existing = Activity.objects.filter(
+                activity_type=Activity.ActivityType.TASK,
+                lease=lease,
+                status__in=(Activity.Status.OPEN, Activity.Status.IN_PROGRESS),
+                subject__startswith="Lease renewal follow-up",
+            ).exists()
+            if existing:
+                return None
+            return Activity.objects.create(
+                activity_type=Activity.ActivityType.TASK,
+                subject=f"Lease renewal follow-up: {lease.reference_code}",
+                assigned_to=lease.property_manager,
+                created_by=lease.property_manager,
+                lease=lease,
+                contact=lease.tenant,
+                status=Activity.Status.OPEN,
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("Lease-expiry task creation failed for lease=%s", lease.pk)
+        return None

@@ -26,3 +26,18 @@ class UserSummarySerializer(serializers.ModelSerializer):
     class Meta:
         model = get_user_model()
         fields = ("id", "full_name", "email")
+
+
+class ContactSummarySerializer(serializers.Serializer):
+    """A contact, as much of them as a foreign key on someone else's record needs.
+
+    A plain Serializer, not a ModelSerializer: `core` sits at the bottom of the DAG and
+    may not import `contacts`, and the four fields below are duck-typed off any Contact
+    instance. One canonical class, because drf-spectacular registers components by name and
+    two identical copies collide into a warning that the schema is probably wrong.
+    """
+
+    id = serializers.UUIDField(read_only=True)
+    display_name = serializers.CharField(source="__str__", read_only=True)
+    email = serializers.CharField(read_only=True)
+    phone = serializers.CharField(read_only=True)

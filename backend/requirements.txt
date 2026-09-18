@@ -17,3 +17,6 @@ python-dotenv==1.0.1
 # which is a per-country rule set, not a regex.
 phonenumbers==9.0.39
 gunicorn==23.0.0
+# Explicit pin: already installed transitively via botocore, but rent-schedule generation
+# and task recurrence depend on it directly — an implicit dependency is a future breakage.
+python-dateutil==2.9.0.post0

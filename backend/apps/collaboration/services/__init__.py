@@ -11,6 +11,7 @@ import-linter's module target `apps.collaboration.services` still resolves.
 from . import files  # noqa: F401 - submodule access for download_target/open_file
 from .activities import (  # noqa: F401
     close_activity_for_source,
+    create_task_for_lease_expiry,
     create_task_for_stage_move,
     upsert_activity_for_source,
 )

@@ -12,8 +12,10 @@ Connected in `apps/platform/apps.py::ready()`.
 """
 from apps.contacts import signals as contact_signals
 from apps.crm import signals as crm_signals
+from apps.finance import signals as finance_signals
 from apps.identity import signals
 from apps.inventory import signals as inventory_signals
+from apps.property_ops import signals as property_ops_signals
 
 from .models import AuditEvent
 from .services import record_event
@@ -276,7 +278,192 @@ def on_gps_track_accessed(sender, *, session, actor, point_count, **kwargs):
     )
 
 
+# --- property_ops (SRS §3.5, §3.14) --------------------------------------------------------
+
+
+def on_lease_created(sender, *, lease, actor, **kwargs):
+    record_event(
+        action=AuditEvent.Action.CREATE,
+        entity_type="LEASE",
+        entity_id=lease.pk,
+        actor=actor,
+        new_values={
+            "reference_code": lease.reference_code,
+            "tenant_id": str(lease.tenant_id),
+            "rent_amount": str(lease.rent_amount),
+        },
+    )
+
+
+def on_lease_status_changed(sender, *, lease, from_status, to_status, actor, reason=None, **kwargs):
+    # This row IS the lease's status history — property_ops deliberately has no history
+    # table, and the append-only audit trail carries the trail instead.
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type="LEASE",
+        entity_id=lease.pk,
+        actor=actor,
+        old_values={"status": from_status},
+        new_values={"status": to_status, "reason": reason},
+    )
+
+
+def on_application_decided(sender, *, application, actor, decision, **kwargs):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type="APPLICATION",
+        entity_id=application.pk,
+        actor=actor,
+        new_values={"decision": decision},
+    )
+
+
+def on_deposit_movement(sender, *, deposit, actor, kind, amount, **kwargs):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type="DEPOSIT",
+        entity_id=deposit.pk,
+        actor=actor,
+        new_values={"movement": kind, "amount": str(amount), "status": deposit.status},
+    )
+
+
+def on_maintenance_status_changed(sender, *, request, from_status, to_status, actor, **kwargs):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type="MAINTENANCE_REQUEST",
+        entity_id=request.pk,
+        actor=actor,
+        old_values={"status": from_status},
+        new_values={"status": to_status},
+    )
+
+
+def on_work_order_completed(sender, *, work_order, actor, final_amount, expense=None, **kwargs):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type="WORK_ORDER",
+        entity_id=work_order.pk,
+        actor=actor,
+        new_values={
+            "status": "COMPLETED",
+            "final_amount": str(final_amount),
+            "expense_id": str(expense.pk) if expense else None,
+        },
+    )
+
+
+# --- finance (SRS §3.6, §5.3) ---------------------------------------------------------------
+
+
+def on_invoice_issued(sender, *, invoice, actor, **kwargs):
+    record_event(
+        action=AuditEvent.Action.CREATE,
+        entity_type="INVOICE",
+        entity_id=invoice.pk,
+        actor=actor,
+        new_values={
+            "invoice_number": invoice.invoice_number,
+            "total_amount": str(invoice.total_amount),
+            "invoice_type": invoice.invoice_type,
+        },
+    )
+
+
+def on_invoice_voided(sender, *, invoice, actor, reason, old_status, **kwargs):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type="INVOICE",
+        entity_id=invoice.pk,
+        actor=actor,
+        old_values={"status": old_status},
+        new_values={"status": invoice.status, "reason": reason},
+    )
+
+
+def on_payment_posted(sender, *, payment, actor, allocations=None, **kwargs):
+    record_event(
+        action=AuditEvent.Action.PAYMENT_POSTED,
+        entity_type="PAYMENT",
+        entity_id=payment.pk,
+        actor=actor,
+        new_values={
+            "payment_reference": payment.payment_reference,
+            "amount": str(payment.amount),
+            "method": payment.payment_method,
+        },
+    )
+
+
+def on_payment_reversed(sender, *, payment, actor, reason, refund=False, **kwargs):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type="PAYMENT",
+        entity_id=payment.pk,
+        actor=actor,
+        old_values={"status": "POSTED"},
+        new_values={"status": payment.status, "reason": reason, "refund": refund},
+    )
+
+
+def on_commission_approved(sender, *, commission, actor, **kwargs):
+    record_event(
+        action=AuditEvent.Action.COMMISSION_APPROVED,
+        entity_type="COMMISSION",
+        entity_id=commission.pk,
+        actor=actor,
+        new_values={"net_commission": str(commission.net_commission)},
+    )
+
+
+def on_commission_paid(sender, *, commission, actor, account, **kwargs):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type="COMMISSION",
+        entity_id=commission.pk,
+        actor=actor,
+        new_values={"status": "PAID", "account_id": str(account.pk)},
+    )
+
+
+def on_cheque_bounced(sender, *, cheque, actor, reason, **kwargs):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type="CHEQUE",
+        entity_id=cheque.pk,
+        actor=actor,
+        new_values={"status": "BOUNCED", "reason": reason},
+    )
+
+
+def on_statement_issued(sender, *, statement, actor, **kwargs):
+    record_event(
+        action=AuditEvent.Action.CREATE,
+        entity_type="OWNER_STATEMENT",
+        entity_id=statement.pk,
+        actor=actor,
+        new_values={
+            "statement_number": statement.statement_number,
+            "net_payable": str(statement.net_payable),
+        },
+    )
+
+
 _WIRING = (
+    (property_ops_signals.lease_created, on_lease_created),
+    (property_ops_signals.lease_status_changed, on_lease_status_changed),
+    (property_ops_signals.application_decided, on_application_decided),
+    (property_ops_signals.deposit_movement, on_deposit_movement),
+    (property_ops_signals.maintenance_status_changed, on_maintenance_status_changed),
+    (property_ops_signals.work_order_completed, on_work_order_completed),
+    (finance_signals.invoice_issued, on_invoice_issued),
+    (finance_signals.invoice_voided, on_invoice_voided),
+    (finance_signals.payment_posted, on_payment_posted),
+    (finance_signals.payment_reversed, on_payment_reversed),
+    (finance_signals.commission_approved, on_commission_approved),
+    (finance_signals.commission_paid, on_commission_paid),
+    (finance_signals.cheque_bounced, on_cheque_bounced),
+    (finance_signals.statement_issued, on_statement_issued),
     (crm_signals.lead_captured, on_lead_captured),
     (crm_signals.lead_assigned, on_lead_assigned),
     (crm_signals.lead_converted, on_lead_converted),

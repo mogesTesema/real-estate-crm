@@ -29,6 +29,8 @@ api_v1 = [
     path("", include("apps.crm.api.urls")),
     path("", include("apps.platform.api.urls")),
     path("", include("apps.collaboration.api.urls")),
+    path("", include("apps.property_ops.api.urls")),
+    path("", include("apps.finance.api.urls")),
 ]
 
 urlpatterns = [
