@@ -5,9 +5,9 @@ is tracked in the frontend repo's own log and omitted here.
 
 **Current state:** the backend has been rebuilt against `architecture.md` v3.2, which
 restructures it into nine apps under a strict import DAG. The **schema is complete** (98
-tables, 256 foreign keys) and **register and login work for all eight roles**, portal clients
-included — with password reset, logout, row scoping, and the audit trail SRS 5.3 requires.
-The other eight apps have models but no endpoints yet. The previous Phase-1 API is preserved at tag
+tables, 256 foreign keys, verified against the spec) and the **`identity` API is live** —
+registration, JWT auth, user administration, and `apply_scope`. The other eight apps have
+models but no endpoints. The previous Phase-1 API is preserved at tag
 **`phase1-flat-layout`**.
 
 Bootstrap with `createsuperuser` (it now attaches the `super_admin` role), create a Company
@@ -15,66 +15,6 @@ and Branch in Django admin, then register everyone else via `POST /api/v1/users/
 
 The demo logins below no longer exist: `seed_demo` was part of the old layout and was removed
 with it. A new seed command arrives with the API pass.
-
----
-
-## Day 14: Fri, Sep 18, 2026; portal clients, password reset, logout, audit
-
-Finished register and login for all eight roles — this time working from
-`full-featured-web-based-real-estate-crm-srs.md` and
-`Real-Estate-CRM-Complete-User-Role-Definitions.md` directly. Both had been sitting untracked
-in the repo root the whole time while being the authority `architecture.md` derives from;
-they are now committed.
-
-**Reading the sources changed two decisions.**
-- SRS 3.15.2 delegates exactly two registration steps — managers register owners, owners
-  register agents. The "admin fallback" that also let owners create property managers,
-  marketing and finance staff was mine, invented before I had the documents. Removed;
-  those three sit with Super Admin, whose 3.15.1 remit is company-wide user governance.
-- Role Definitions §4 puts portal invitation under the Sales/Leasing Agent ("Invite portal
-  access only for clients with completed contracts") and §5 gives the Property Manager tenant
-  onboarding. That settled who may invite whom far better than my guess would have.
-
-**The portal, and the DAG problem it posed.** A client's login is gated on a completed
-contract (SRS 3.11.2), but contracts live in `crm` and `property_ops`, which `identity` may
-not import. Solved by inverting the dependency: `identity` defines signals and sends them,
-the domain apps answer from receivers connected in `apps.py::ready()`. The import arrow
-points the legal way and `lint-imports` staying at 15/15 is the proof. **Silence is
-refusal** — an uninstalled app, a missing contract, a contract in the wrong state and a
-contact unconnected to it all look identical from `identity`, and all mean no.
-
-The same inversion then solved the audit gap flagged on Day 13, which was blocked by exactly
-the same constraint. One mechanism, two problems.
-
-**Eligibility, read off the real enums rather than paraphrased.** A lease counts when ACTIVE,
-EXPIRING or RENEWED — deliberately *narrower* than `Lease.OCCUPYING_STATUSES`, which includes
-PENDING_SIGNATURE. That constant is right for the double-letting exclusion it was written
-for and wrong here: the SRS says "signed", and awaiting signature is not signed. Being party
-to the contract is checked too — a co-tenant qualifies (architecture.md §2 says
-"tenant/**party**"), a guarantor does not.
-
-**Two test-infrastructure bugs worth recording.**
-- Throttling was silently self-throttling the suite. Hundreds of logins share one LocMem
-  counter, so whichever test happened to run last failed — a flake with nothing to do with
-  the code under test. Disabled in test settings (with the scopes still *present*: a missing
-  scope raises rather than meaning unlimited) and covered properly in `test_throttling.py`,
-  which patches the class attribute, since DRF binds `THROTTLE_RATES` at import and
-  `override_settings` cannot reach it.
-- An audit-cleanup fixture tried `DELETE` on `platform_audit_event` and got "permission
-  denied". That is the append-only guarantee working exactly as designed; the fixture was
-  wrong. Per-test transaction rollback needs no privilege.
-
-Also: a silent `str.replace` in a bulk edit didn't match after an earlier edit shifted its
-anchor, so the `user_registered` signal never landed and only one audit test caught it.
-Assert on every programmatic replacement.
-
-**DoD**
-- 298 tests (was 219). The portal file alone covers the invite matrix, every contract status
-  on both sides, fail-closed behaviour, and client isolation in both directions.
-- Walked the lifecycle against a running server: PM registered → tenant invited against a
-  real ACTIVE lease → client logs in, forced to choose her own password, sees zero staff,
-  cannot register anyone → access revoked → login stops → record survives as SUSPENDED. The
-  audit table held all twelve events, including the failed logins with no actor.
 
 ---
 
@@ -204,7 +144,11 @@ the repo back to a state where `migrate` is meaningful.
   `selectors.py`, `tasks.py`, `api/` — across all nine apps, plus the normative `models/`
   packages for the three fat apps (`crm`, `property_ops`, `collaboration`).
 - Wired **import-linter** contracts into CI. The §1.2 matrix is not a pure layering
-  (`collaboration`/`platform` are satellites everyone calls, and `crm` ↔ `property_ops` is
+  (`collaboration`/`platform` are satellites everyone calls, and `crm` ↔ `property_ops` isail so soft-deleting a user frees the address. I kept the partial index and silenced the check — with the consequence documented, since every email lookup must now filter deleted_at.
+
+A real deployment hazard fixed in passing: the app DB role was named three different things across compose, CI, and settings, and db_policy reads that name at migrate time to build the append-only REVOKEs. The mismatch would have revoked from a role nobody connects as, leaving the four immutable tables quietly mutable.
+
+What is deliberately
   bidirectional by design), so the contracts encode the parts that are absolute: the
   `core → identity → contacts → inventory` spine, the ban on importing another app's `api/`,
   and the ban on satellites calling domain write services.

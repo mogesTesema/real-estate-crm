@@ -19,7 +19,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 
 from .. import services, signals
 from ..models import PortalProfile, Role, User
-from ..selectors import apply_scope, scopes_for
+from ..selectors import ScopedQuerysetMixin, scopes_for
 from .permissions import CanInvitePortalUsers, CanRegisterUsers, PasswordIsCurrent
 from .serializers import (
     AssignRoleSerializer,
@@ -222,6 +222,7 @@ class ChangePasswordView(APIView):
 
 
 class UserViewSet(
+    ScopedQuerysetMixin,
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
@@ -246,8 +247,10 @@ class UserViewSet(
     ordering_fields = ["first_name", "last_name", "created_at"]
     ordering = ["first_name", "last_name"]
 
-    def get_queryset(self):
-        qs = (
+    scope_resource = "user"
+
+    def get_unscoped_queryset(self):
+        return (
             User.objects.filter(deleted_at__isnull=True)
             # A portal client is not a colleague. They hold a login but belong to no branch
             # and appear in no staff directory — SRS 3.11.6 makes their isolation a hard
@@ -256,7 +259,6 @@ class UserViewSet(
             .select_related("branch", "branch__company", "team")
             .prefetch_related("user_roles__role")
         )
-        return apply_scope(qs, self.request.user, "user")
 
     def get_serializer_class(self):
         if self.action == "create":

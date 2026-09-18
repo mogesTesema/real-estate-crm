@@ -372,6 +372,14 @@ class RecordShare(models.Model):
 
     class Meta:
         db_table = "identity_record_share"
+        indexes = [
+            # apply_scope's share union runs on every scoped list query for every user whose
+            # roles grant less than everything, and looks up exactly this pair.
+            models.Index(
+                fields=["shared_with_user", "entity_type"],
+                name="identity_share_lookup_idx",
+            ),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=["entity_type", "entity_id", "shared_with_user"],

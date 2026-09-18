@@ -276,6 +276,31 @@ Rules:
 * Postgres RLS keyed on a session GUC is **optional** defense-in-depth for finance tables; the application scoping layer is **mandatory**.
 * Money mutations remain restricted to `finance.services` regardless of scope.
 
+#### How `apply_scope` is wired (normative, added v3.3)
+
+`identity` sits near the bottom of the import DAG (§1.2) and may not name the models of the
+domains above it. So `apply_scope` owns only the *mechanism*; each app declares its own
+resources into a registry from its `AppConfig.ready()`, where the rules sit next to the models
+they guard.
+
+A registration is a table of **`data_scope` → predicate**, one row per scope, per resource:
+
+| Rule | Why |
+| :--- | :--- |
+| A scope a resource does not mention sees **nothing**. | Deny by default. Omission must never read as "everything". |
+| `FINANCE_ALL` / `MARKETING_ALL` are **not** aliases for `ALL`. | §2 grants them their own modules agency-wide and everything else "per permission/grant". A shared agency-wide set consulted by a generic builder would hand marketing every lead in the company. |
+| Multiple roles **OR**, never rank. | `identity_user_role` has no `is_primary` flag, and `FINANCE_ALL` vs `BRANCH` — module-wide vs org-position-wide — admit no total ordering. |
+| A scope granting everything **short-circuits**; it is not an empty `Q()`. | `Q()` is Django's identity element, so `Q() | Q(owner=me)` collapses to `Q(owner=me)` — a broad role would *narrow* access when OR-ed with a narrow one. |
+| `identity_record_share` is unioned **outside** the role loop, filtered on `expires_at`. | A share is a grant in its own right: it must reach a user whose roles grant nothing on that resource, which is the entire point of the table. Both `VIEW` and `EDIT` grant visibility; the distinction is a write-path question. |
+| To-many anchors are expressed as `pk IN (SELECT …)`, never as a JOIN. | A to-many JOIN multiplies outer rows, forcing `.distinct()` on every scoped list — and `DISTINCT` against pagination's `COUNT(*)` is a known cliff. `apply_scope` therefore issues no `DISTINCT`. |
+| An unregistered resource **raises**. | A silent fallback to the unfiltered queryset is how scoping layers quietly stop scoping. |
+
+Endpoints inherit `identity.selectors.ScopedQuerysetMixin` and set `scope_resource`. The mixin
+refuses a view that sets no resource, and refuses **at import time** a view that overrides
+`get_queryset` — the obvious place to add `select_related`, and the one edit that silently
+removes scoping, since the subclass method wins the MRO. Views shape the queryset in
+`get_unscoped_queryset` instead.
+
 ### Custom Fields & Extensibility
 
 Admin-defined fields and picklists must be addable without migrations (SRS 2.5 / 3.17.4):
