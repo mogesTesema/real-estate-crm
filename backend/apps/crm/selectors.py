@@ -117,3 +117,172 @@ def source_performance(user):
         )
         .order_by("-leads")
     )
+
+
+# --- Matching engine (SRS 3.3.8) ------------------------------------------------------------
+#
+# Forward: what should we show this lead? Reverse: who should hear about this listing?
+# Both sides tolerate missing data — a lead with no budget still matches on type and area,
+# because "no answer yet" is not "matches nothing".
+
+#: Which listing types serve which lead types. SELL and RENT_OUT supply stock — they have
+#: no demand side to match against, and return empty by design.
+LEAD_TYPE_TO_LISTING_TYPES = {
+    "BUY": ("SALE", "SALE_AND_RENT"),
+    "INVEST": ("SALE", "SALE_AND_RENT"),
+    "RENT_IN": ("RENT", "SALE_AND_RENT"),
+}
+
+#: Budget tolerance: a 1.05M listing is still worth showing a 1M-budget buyer (SRS 3.3.8).
+BUDGET_TOLERANCE = 0.10
+
+
+def matching_listings_for_lead(lead, *, since=None):
+    """ACTIVE listings this lead should see. `since` powers saved-search alerts — only
+    what appeared after the last run."""
+    from decimal import Decimal
+
+    from django.contrib.gis.geos import Point
+    from django.contrib.gis.measure import D
+
+    from apps.inventory.models import Listing
+    from apps.inventory.selectors import live_listings
+
+    types = LEAD_TYPE_TO_LISTING_TYPES.get(lead.lead_type)
+    if not types:
+        return Listing.objects.none()
+
+    queryset = (
+        live_listings()
+        .filter(status=Listing.Status.ACTIVE, listing_type__in=types)
+        .select_related("property", "property__property_type")
+    )
+
+    low = Decimal(1) - Decimal(str(BUDGET_TOLERANCE))
+    high = Decimal(1) + Decimal(str(BUDGET_TOLERANCE))
+    price_field = "rent_amount" if lead.lead_type == "RENT_IN" else "asking_price"
+    if lead.budget_min:
+        queryset = queryset.filter(
+            **{f"{price_field}__gte": Decimal(lead.budget_min) * low}
+        )
+    if lead.budget_max:
+        queryset = queryset.filter(
+            **{f"{price_field}__lte": Decimal(lead.budget_max) * high}
+        )
+    if lead.preferred_bedrooms:
+        queryset = queryset.filter(property__bedrooms__gte=lead.preferred_bedrooms)
+    if lead.preferred_property_type:
+        queryset = queryset.filter(
+            property__property_type__name__icontains=lead.preferred_property_type
+        )
+
+    # Location: geo preferences use the GiST index (dwithin); text preferences fall back to
+    # city/address containment. All preferences OR together — the lead is interested in ANY
+    # of their areas.
+    area = Q()
+    for pref in lead.location_preferences.all():
+        if pref.latitude is not None and pref.longitude is not None and pref.radius_km:
+            centre = Point(float(pref.longitude), float(pref.latitude), srid=4326)
+            area |= Q(
+                property__geo_point__dwithin=(centre, D(km=float(pref.radius_km)))
+            )
+        elif pref.location:
+            area |= (
+                Q(property__city__icontains=pref.location)
+                | Q(property__address_line_1__icontains=pref.location)
+            )
+    if not area and lead.preferred_location:
+        area = (
+            Q(property__city__icontains=lead.preferred_location)
+            | Q(property__address_line_1__icontains=lead.preferred_location)
+        )
+    if area:
+        queryset = queryset.filter(area)
+
+    if since:
+        queryset = queryset.filter(
+            Q(published_at__gte=since) | Q(created_at__gte=since)
+        )
+    return queryset.order_by("-published_at", "-created_at")
+
+
+#: The demand side of each listing type.
+LISTING_TYPE_TO_LEAD_TYPES = {
+    "SALE": ("BUY", "INVEST"),
+    "RENT": ("RENT_IN",),
+    "SALE_AND_RENT": ("BUY", "INVEST", "RENT_IN"),
+}
+
+#: Lead statuses still in the market.
+_OPEN_LEAD_STATUSES = ("NEW", "CONTACTED", "QUALIFIED", "NURTURING")
+
+
+def matching_leads_for_listing(listing, user):
+    """Open leads — **scoped to the caller** — whose requirements this listing satisfies.
+
+    SQL narrows on type, status, budget window and bedrooms; the per-preference radius test
+    runs in Python because the coordinates live as decimals on the preference rows, not as
+    a geography column. The scoped, narrowed set is small; the arithmetic is not the cost.
+    """
+    from decimal import Decimal
+
+    lead_types = LISTING_TYPE_TO_LEAD_TYPES.get(listing.listing_type, ())
+    queryset = apply_scope(live_leads(), user, "lead").filter(
+        lead_type__in=lead_types, status__in=_OPEN_LEAD_STATUSES
+    ).select_related("contact").prefetch_related("location_preferences")
+
+    low = Decimal(1) - Decimal(str(BUDGET_TOLERANCE))
+    high = Decimal(1) + Decimal(str(BUDGET_TOLERANCE))
+    sale_price, rent_price = listing.asking_price, listing.rent_amount
+    prop = listing.property
+
+    matches = []
+    for lead in queryset:
+        price = rent_price if lead.lead_type == "RENT_IN" else sale_price
+        if price is not None:
+            if lead.budget_max is not None and price > Decimal(lead.budget_max) * high:
+                continue
+            if lead.budget_min is not None and price < Decimal(lead.budget_min) * low:
+                continue
+        if (
+            lead.preferred_bedrooms is not None
+            and prop.bedrooms is not None
+            and prop.bedrooms < lead.preferred_bedrooms
+        ):
+            continue
+
+        prefs = list(lead.location_preferences.all())
+        if prefs:
+            def _pref_ok(pref):
+                if (
+                    pref.latitude is not None and pref.longitude is not None
+                    and pref.radius_km and prop.latitude is not None
+                    and prop.longitude is not None
+                ):
+                    return _haversine_km(
+                        float(pref.latitude), float(pref.longitude),
+                        float(prop.latitude), float(prop.longitude),
+                    ) <= float(pref.radius_km)
+                if pref.location:
+                    needle = pref.location.lower()
+                    return (
+                        needle in (prop.city or "").lower()
+                        or needle in (prop.address_line_1 or "").lower()
+                    )
+                return False
+
+            if not any(_pref_ok(pref) for pref in prefs):
+                continue
+        matches.append(lead)
+    return matches
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    import math
+
+    radius = 6371.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
+    return 2 * radius * math.asin(math.sqrt(a))

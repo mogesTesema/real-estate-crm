@@ -19,3 +19,15 @@ lead_converted = Signal()
 #: only half that control; this is the other half.
 #: kwargs: session, actor, point_count
 gps_track_accessed = Signal()
+
+#: SRS 3.4.4 — every stage move is audit- and webhook-worthy.
+#: kwargs: deal, actor, from_stage, to_stage, reason
+deal_stage_moved = Signal()
+
+#: SRS 3.6.1 — an accepted offer settles the negotiation.
+#: kwargs: offer, actor
+offer_accepted = Signal()
+
+#: SRS 3.6.6 — transaction lifecycle for audit + webhook fan-out.
+#: kwargs: transaction_obj, actor, from_status, to_status
+transaction_status_changed = Signal()

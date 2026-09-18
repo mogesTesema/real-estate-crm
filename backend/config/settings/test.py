@@ -39,6 +39,9 @@ REST_FRAMEWORK = {  # noqa: F405
         "password_reset": None,
         "file_upload": None,
         "esign_public": None,
+        "public_listings": None,
+        "public_inquiry": None,
+        "public_page": None,
     },
 }
 

@@ -6,12 +6,19 @@ queryset runs through `ScopedQuerysetMixin`, per architecture.md §2.
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
+from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import (
+    MethodNotAllowed,
+    NotFound,
+    PermissionDenied,
+    ValidationError,
+)
 from rest_framework.response import Response
 from rest_framework.settings import api_settings
+from rest_framework.views import APIView
 
 from apps.identity.permissions import IsAgencyAdmin
 from apps.identity.selectors import ScopedQuerysetMixin
@@ -44,6 +51,7 @@ from .serializers import (
     LeadStatusSerializer,
     LeadUpdateSerializer,
     LinkPropertySerializer,
+    ListingMatchCardSerializer,
     MoveStageSerializer,
     PipelineSerializer,
     RoutingRuleSerializer,
@@ -767,3 +775,568 @@ class FieldSessionViewSet(
         return Response(
             {"recorded": len(rows)}, status=status.HTTP_201_CREATED
         )
+
+
+# --- Offers (SRS 3.6.1) ---------------------------------------------------------------------
+
+
+class OfferViewSet(
+    ScopedQuerysetMixin,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Offers are immutable once submitted — there is no update route at all. A wrong offer
+    is withdrawn or countered, which is how the negotiation history stays honest."""
+
+    scope_resource = "offer"
+    filterset_fields = ["deal", "property", "status", "direction"]
+    ordering = ["-submitted_at"]
+
+    def get_unscoped_queryset(self):
+        from ..models import Offer
+
+        return Offer.objects.select_related("offered_by_contact", "deal", "property")
+
+    def get_serializer_class(self):
+        from .serializers import OfferCreateSerializer, OfferSerializer
+
+        return OfferCreateSerializer if self.action == "create" else OfferSerializer
+
+    def create(self, request, *args, **kwargs):
+        from apps.contacts.selectors import live_contacts
+        from apps.inventory.selectors import live_properties
+
+        from .serializers import OfferCreateSerializer, OfferSerializer
+
+        payload = OfferCreateSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        data = dict(payload.validated_data)
+        deal = get_object_or_404(
+            selectors.visible_deals(request.user), pk=data.pop("deal")
+        )
+        if data.get("property"):
+            data["property"] = get_object_or_404(
+                live_properties(), pk=data["property"]
+            )
+        if data.get("offered_by_contact"):
+            data["offered_by_contact"] = get_object_or_404(
+                live_contacts(), pk=data["offered_by_contact"]
+            )
+        try:
+            offer = services.create_offer(actor=request.user, deal=deal, **data)
+        except Exception as exc:  # noqa: BLE001 - narrowed by _translate
+            _translate(exc)
+        return Response(OfferSerializer(offer).data, status=status.HTTP_201_CREATED)
+
+    def _lifecycle(self, request, service, **kwargs):
+        from .serializers import OfferSerializer
+
+        try:
+            offer = service(self.get_object(), actor=request.user, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(OfferSerializer(offer).data)
+
+    @action(detail=True, methods=["post"])
+    def submit(self, request, pk=None):
+        return self._lifecycle(request, services.submit_offer)
+
+    @action(detail=True, methods=["post"])
+    def withdraw(self, request, pk=None):
+        return self._lifecycle(request, services.withdraw_offer)
+
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+        return self._lifecycle(request, services.reject_offer)
+
+    @action(detail=True, methods=["post"])
+    def accept(self, request, pk=None):
+        return self._lifecycle(request, services.accept_offer)
+
+    @action(detail=True, methods=["post"])
+    def counter(self, request, pk=None):
+        from apps.contacts.selectors import live_contacts
+
+        from .serializers import CounterOfferSerializer, OfferSerializer
+
+        payload = CounterOfferSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        data = dict(payload.validated_data)
+        if data.get("offered_by_contact"):
+            data["offered_by_contact"] = get_object_or_404(
+                live_contacts(), pk=data["offered_by_contact"]
+            )
+        try:
+            counter = services.counter_offer(
+                self.get_object(), actor=request.user, **data
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(OfferSerializer(counter).data, status=status.HTTP_201_CREATED)
+
+
+# --- Transactions (SRS 3.6.6) ---------------------------------------------------------------
+
+
+class TransactionViewSet(
+    ScopedQuerysetMixin,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Read-only plus the status action: transactions are minted by `mark_deal_won`, never
+    typed in by hand."""
+
+    scope_resource = "transaction"
+    filterset_fields = ["deal", "property", "transaction_type", "status"]
+    ordering = ["-transaction_date"]
+
+    def get_unscoped_queryset(self):
+        from ..models import Transaction
+
+        return Transaction.objects.select_related("deal", "property")
+
+    def get_serializer_class(self):
+        from .serializers import TransactionSerializer
+
+        return TransactionSerializer
+
+    @action(detail=True, methods=["post"], url_path="status")
+    def set_status(self, request, pk=None):
+        from .serializers import TransactionSerializer, TransactionStatusSerializer
+
+        payload = TransactionStatusSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            transaction_obj = services.change_transaction_status(
+                self.get_object(),
+                payload.validated_data["status"],
+                actor=request.user,
+                reason=payload.validated_data.get("reason"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(TransactionSerializer(transaction_obj).data)
+
+
+# --- Closing checklists (SRS 3.6.6) ---------------------------------------------------------
+
+
+class ClosingChecklistViewSet(
+    ScopedQuerysetMixin,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+    viewsets.GenericViewSet,
+):
+    scope_resource = "closing_checklist"
+    filterset_fields = ["deal", "transaction", "checklist_type", "status"]
+    ordering = ["-created_at"]
+
+    def get_unscoped_queryset(self):
+        from ..models import ClosingChecklist
+
+        return ClosingChecklist.objects.select_related(
+            "deal", "transaction"
+        ).prefetch_related("items")
+
+    def get_serializer_class(self):
+        from .serializers import ChecklistCreateSerializer, ClosingChecklistSerializer
+
+        return (
+            ChecklistCreateSerializer
+            if self.action == "create"
+            else ClosingChecklistSerializer
+        )
+
+    def create(self, request, *args, **kwargs):
+        from apps.identity.selectors import apply_scope
+
+        from ..models import Transaction
+        from .serializers import ChecklistCreateSerializer, ClosingChecklistSerializer
+
+        payload = ChecklistCreateSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        data = dict(payload.validated_data)
+        deal = transaction_obj = None
+        if data.get("deal"):
+            deal = get_object_or_404(
+                selectors.visible_deals(request.user), pk=data.pop("deal")
+            )
+        else:
+            data.pop("deal", None)
+        if data.get("transaction"):
+            transaction_obj = get_object_or_404(
+                apply_scope(Transaction.objects.all(), request.user, "transaction"),
+                pk=data.pop("transaction"),
+            )
+        else:
+            data.pop("transaction", None)
+        items = [dict(item) for item in data.pop("items", [])]
+        try:
+            checklist = services.create_checklist(
+                actor=request.user, deal=deal, transaction_obj=transaction_obj,
+                items=items, **data,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(
+            ClosingChecklistSerializer(checklist).data, status=status.HTTP_201_CREATED
+        )
+
+    def _lifecycle(self, request, service, **kwargs):
+        from .serializers import ClosingChecklistSerializer
+
+        try:
+            checklist = service(self.get_object(), actor=request.user, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(ClosingChecklistSerializer(checklist).data)
+
+    @action(detail=True, methods=["post"])
+    def complete(self, request, pk=None):
+        return self._lifecycle(request, services.complete_checklist)
+
+    @action(detail=True, methods=["post"])
+    def cancel(self, request, pk=None):
+        return self._lifecycle(request, services.cancel_checklist)
+
+    @action(detail=True, methods=["post"])
+    def items(self, request, pk=None):
+        from .serializers import ChecklistItemInputSerializer, ChecklistItemSerializer
+
+        payload = ChecklistItemInputSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            item = services.add_checklist_item(
+                self.get_object(), actor=request.user, **payload.validated_data
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(ChecklistItemSerializer(item).data, status=status.HTTP_201_CREATED)
+
+    @extend_schema(
+        parameters=[OpenApiParameter("item_id", OpenApiTypes.UUID, OpenApiParameter.PATH)]
+    )
+    @action(
+        detail=True, methods=["post"],
+        url_path=r"items/(?P<item_id>[^/.]+)/complete",
+    )
+    def complete_item(self, request, pk=None, item_id=None):
+        from .serializers import ChecklistItemSerializer, CompleteItemSerializer
+
+        item = get_object_or_404(self.get_object().items, pk=item_id)
+        payload = CompleteItemSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        document = None
+        if payload.validated_data.get("document"):
+            from apps.collaboration.selectors import (
+                document_access_level,
+                live_documents,
+            )
+
+            document = get_object_or_404(
+                live_documents(), pk=payload.validated_data["document"]
+            )
+            if document_access_level(request.user, document) is None:
+                raise NotFound
+        try:
+            item = services.complete_checklist_item(
+                item, actor=request.user, document=document
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(ChecklistItemSerializer(item).data)
+
+    @extend_schema(
+        parameters=[OpenApiParameter("item_id", OpenApiTypes.UUID, OpenApiParameter.PATH)]
+    )
+    @action(
+        detail=True, methods=["post"],
+        url_path=r"items/(?P<item_id>[^/.]+)/reopen",
+    )
+    def reopen_item(self, request, pk=None, item_id=None):
+        from .serializers import ChecklistItemSerializer
+
+        item = get_object_or_404(self.get_object().items, pk=item_id)
+        try:
+            item = services.reopen_checklist_item(item, actor=request.user)
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(ChecklistItemSerializer(item).data)
+
+
+
+# --- Matching engine (SRS 3.3.8) ------------------------------------------------------------
+
+
+class LeadMatchesView(APIView):
+    """`GET /leads/{id}/matches/` — ACTIVE listings this lead should be shown, on the same
+    safe card the public site uses."""
+
+    @extend_schema(responses={200: ListingMatchCardSerializer(many=True)})
+    def get(self, request, pk):
+
+        lead = get_object_or_404(selectors.visible_leads(request.user), pk=pk)
+        since = request.query_params.get("since")
+        queryset = selectors.matching_listings_for_lead(lead, since=since or None)[:50]
+        return Response(ListingMatchCardSerializer(queryset, many=True).data)
+
+
+class ListingMatchingLeadsView(APIView):
+    """`GET /listings/{id}/matching-leads/` — open leads (scoped to the caller) whose
+    requirements this listing satisfies. Lives in crm: inventory cannot import crm."""
+
+    @extend_schema(responses={200: LeadSerializer(many=True)})
+    def get(self, request, pk):
+        from apps.inventory.selectors import visible_listings
+
+        listing = get_object_or_404(visible_listings(request.user), pk=pk)
+        leads = selectors.matching_leads_for_listing(listing, request.user)[:50]
+        return Response(LeadSerializer(leads, many=True).data)
+
+
+# --- Marketing (SRS §3.8) -------------------------------------------------------------------
+
+
+class CampaignViewSet(viewsets.ModelViewSet):
+    """Campaigns are agency-wide marketing configuration, not scoped records: staff read,
+    marketing staff write (§2 gives MARKETING_ALL campaign objects agency-wide)."""
+
+    filterset_fields = ["status", "campaign_type", "owner"]
+    search_fields = ["name"]
+    ordering = ["-start_date"]
+
+    def get_permissions(self):
+        from apps.identity.permissions import IsMarketingStaff, IsStaff
+
+        base = [*super().get_permissions(), IsStaff()]
+        if self.request.method not in ("GET", "HEAD", "OPTIONS"):
+            base.append(IsMarketingStaff())
+        return base
+
+    def get_queryset(self):
+        from ..models import Campaign
+
+        return Campaign.objects.select_related("owner").prefetch_related("steps")
+
+    def get_serializer_class(self):
+        from .serializers import CampaignSerializer
+
+        return CampaignSerializer
+
+    def create(self, request, *args, **kwargs):
+        from .serializers import CampaignSerializer
+
+        payload = CampaignSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            campaign = services.create_campaign(
+                actor=request.user, **payload.validated_data
+            )
+        except Exception as exc:  # noqa: BLE001 - narrowed by _translate
+            _translate(exc)
+        return Response(CampaignSerializer(campaign).data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        from .serializers import CampaignSerializer
+
+        payload = CampaignSerializer(
+            instance=self.get_object(), data=request.data,
+            partial=kwargs.pop("partial", False),
+        )
+        payload.is_valid(raise_exception=True)
+        try:
+            campaign = services.update_campaign(
+                self.get_object(), actor=request.user, **payload.validated_data
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(CampaignSerializer(campaign).data)
+
+    def destroy(self, request, *args, **kwargs):
+        raise MethodNotAllowed("DELETE")  # history: metrics and enrollments hang off it
+
+    @action(detail=True, methods=["post"])
+    def steps(self, request, pk=None):
+        from .serializers import CampaignStepSerializer
+
+        payload = CampaignStepSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        data = dict(payload.validated_data)
+        try:
+            step = services.add_campaign_step(
+                self.get_object(), actor=request.user, **data
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(CampaignStepSerializer(step).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["get", "post"])
+    def metrics(self, request, pk=None):
+        from .serializers import CampaignMetricSerializer, MetricDeltaSerializer
+
+        campaign = self.get_object()
+        if request.method == "GET":
+            return Response(
+                CampaignMetricSerializer(
+                    campaign.metrics.order_by("-metric_date"), many=True
+                ).data
+            )
+        payload = MetricDeltaSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        data = dict(payload.validated_data)
+        try:
+            row = services.record_campaign_metric(
+                campaign, data.pop("metric_date"), **data
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(CampaignMetricSerializer(row).data)
+
+    @action(detail=True, methods=["post"])
+    def enroll(self, request, pk=None):
+        from .serializers import EnrollmentSerializer
+
+        lead = get_object_or_404(
+            selectors.visible_leads(request.user), pk=request.data.get("lead")
+        )
+        try:
+            enrollment = services.enroll_lead(
+                self.get_object(), lead, actor=request.user
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(
+            EnrollmentSerializer(enrollment).data, status=status.HTTP_201_CREATED
+        )
+
+    @action(detail=True, methods=["get"])
+    def enrollments(self, request, pk=None):
+        from .serializers import EnrollmentSerializer
+
+        return Response(
+            EnrollmentSerializer(
+                self.get_object().enrollments.select_related("lead").order_by(
+                    "-enrolled_at"
+                )[:200],
+                many=True,
+            ).data
+        )
+
+
+class LandingPageViewSet(viewsets.ModelViewSet):
+    filterset_fields = ["campaign", "is_published"]
+    search_fields = ["slug", "title"]
+    ordering = ["-created_at"]
+    lookup_field = "slug"
+
+    def get_permissions(self):
+        from apps.identity.permissions import IsMarketingStaff, IsStaff
+
+        base = [*super().get_permissions(), IsStaff()]
+        if self.request.method not in ("GET", "HEAD", "OPTIONS"):
+            base.append(IsMarketingStaff())
+        return base
+
+    def get_queryset(self):
+        from ..models import LandingPage
+
+        return LandingPage.objects.select_related("campaign", "lead_source")
+
+    def get_serializer_class(self):
+        from .serializers import LandingPageSerializer
+
+        return LandingPageSerializer
+
+    def create(self, request, *args, **kwargs):
+        from .serializers import LandingPageSerializer
+
+        payload = LandingPageSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            page = services.create_landing_page(
+                actor=request.user, **payload.validated_data
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(LandingPageSerializer(page).data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        from .serializers import LandingPageSerializer
+
+        payload = LandingPageSerializer(
+            instance=self.get_object(), data=request.data,
+            partial=kwargs.pop("partial", False),
+        )
+        payload.is_valid(raise_exception=True)
+        try:
+            page = services.update_landing_page(
+                self.get_object(), actor=request.user, **payload.validated_data
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(LandingPageSerializer(page).data)
+
+
+class SavedSearchAlertViewSet(
+    ScopedQuerysetMixin,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+    mixins.UpdateModelMixin,
+    viewsets.GenericViewSet,
+):
+    scope_resource = "saved_search_alert"
+    filterset_fields = ["contact", "frequency", "channel", "is_active"]
+    ordering = ["-created_at"]
+
+    def get_unscoped_queryset(self):
+        from ..models import SavedSearchAlert
+
+        return SavedSearchAlert.objects.select_related("contact")
+
+    def get_serializer_class(self):
+        from .serializers import SavedSearchAlertSerializer
+
+        return SavedSearchAlertSerializer
+
+    def create(self, request, *args, **kwargs):
+        from apps.contacts.selectors import visible_contacts
+
+        from .serializers import SavedSearchAlertSerializer
+
+        payload = SavedSearchAlertSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        data = dict(payload.validated_data)
+        contact = data.pop("contact")
+        contact = get_object_or_404(visible_contacts(request.user), pk=contact.pk)
+        try:
+            alert = services.create_saved_search_alert(
+                actor=request.user, contact=contact, **data
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(
+            SavedSearchAlertSerializer(alert).data, status=status.HTTP_201_CREATED
+        )
+
+    def update(self, request, *args, **kwargs):
+        from .serializers import SavedSearchAlertSerializer
+
+        payload = SavedSearchAlertSerializer(
+            instance=self.get_object(), data=request.data,
+            partial=kwargs.pop("partial", False),
+        )
+        payload.is_valid(raise_exception=True)
+        data = dict(payload.validated_data)
+        data.pop("contact", None)  # an alert never changes hands
+        try:
+            alert = services.update_saved_search_alert(
+                self.get_object(), actor=request.user, **data
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(SavedSearchAlertSerializer(alert).data)

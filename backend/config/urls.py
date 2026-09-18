@@ -33,10 +33,19 @@ api_v1 = [
     path("", include("apps.finance.api.urls")),
 ]
 
+# Unauthenticated, rate-limited endpoints for the public website: published-listing
+# search, web-form lead capture, landing pages. E-sign token URLs stay under /api/v1/
+# (they carry their own capability token).
+api_public = [
+    path("", include("apps.inventory.api.public_urls")),
+    path("", include("apps.crm.api.public_urls")),
+]
+
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("healthz/", healthz, name="healthz"),
     path("api/v1/", include((api_v1, "api"), namespace="v1")),
+    path("api/public/", include((api_public, "api-public"), namespace="public")),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path(
         "api/docs/",

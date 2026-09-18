@@ -59,6 +59,7 @@ EXPECTED_TABLES = {
     "crm": {
         "crm_lead_source",
         "crm_campaign",
+        "crm_campaign_enrollment",
         "crm_campaign_metric",
         "crm_campaign_step",
         "crm_landing_page",

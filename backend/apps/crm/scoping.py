@@ -87,6 +87,56 @@ def register_resources():
         scopes={s: nested("deal", "deal") for s in scope.values},
     )
 
+    from .models import ClosingChecklist, Offer, Transaction
+
+    # An offer is a chapter of its deal's negotiation — it inherits the deal's visibility
+    # wholesale, including the portal's closed-deals-only rule (§2: "own closed
+    # deals/offers/documents").
+    register(
+        "offer",
+        model=Offer,
+        entity_type=None,
+        scopes={s: nested("deal", "deal") for s in scope.values},
+    )
+
+    # `Transaction.deal` is nullable (imports, direct sales), so deal inheritance alone
+    # would hide deal-less transactions from everyone. FINANCE_ALL and ALL read them all;
+    # everyone else reaches a transaction through its deal.
+    register(
+        "transaction",
+        model=Transaction,
+        entity_type=None,
+        scopes={
+            scope.ALL: EVERYTHING,
+            scope.FINANCE_ALL: EVERYTHING,
+            **{
+                s: nested("deal", "deal")
+                for s in (scope.BRANCH, scope.TEAM, scope.OWN, scope.MANAGED_PROPERTIES)
+            },
+            scope.MARKETING_ALL: NOTHING,
+            scope.PORTAL_OWN: nested("deal", "deal"),
+        },
+    )
+
+    # A checklist may hang off a deal or a transaction; either parent's visibility grants
+    # it. Portal clients have no business in closing paperwork.
+    register(
+        "closing_checklist",
+        model=ClosingChecklist,
+        entity_type=None,
+        scopes={
+            **{
+                s: nested("deal", "deal") | nested("transaction", "transaction")
+                for s in (
+                    scope.ALL, scope.BRANCH, scope.TEAM, scope.OWN,
+                    scope.MANAGED_PROPERTIES, scope.FINANCE_ALL,
+                )
+            },
+            scope.MARKETING_ALL: NOTHING,
+            scope.PORTAL_OWN: NOTHING,
+        },
+    )
+
     register(
         "viewing",
         model=Viewing,
@@ -120,5 +170,19 @@ def register_resources():
             scope.FINANCE_ALL: NOTHING,
             scope.MARKETING_ALL: NOTHING,
             scope.PORTAL_OWN: NOTHING,
+        },
+    )
+
+    from .models import SavedSearchAlert
+
+    # An alert belongs to the contact it serves; staff reach it through the contact's
+    # visibility, and marketing sees them all (§2: marketing objects agency-wide).
+    register(
+        "saved_search_alert",
+        model=SavedSearchAlert,
+        entity_type=None,
+        scopes={
+            **{s_: nested("contact", "contact") for s_ in scope.values},
+            scope.MARKETING_ALL: EVERYTHING,
         },
     )

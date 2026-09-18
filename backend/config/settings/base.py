@@ -192,6 +192,10 @@ REST_FRAMEWORK = {
         "file_upload": env("FILE_UPLOAD_THROTTLE_RATE", "30/min"),
         # Public token-URL signing: unauthenticated by design, so throttled by design.
         "esign_public": env("ESIGN_PUBLIC_THROTTLE_RATE", "30/min"),
+        # /api/public/ — anonymous by design, throttled by design.
+        "public_listings": env("PUBLIC_LISTINGS_THROTTLE_RATE", "60/min"),
+        "public_inquiry": env("PUBLIC_INQUIRY_THROTTLE_RATE", "5/min"),
+        "public_page": env("PUBLIC_PAGE_THROTTLE_RATE", "30/min"),
     },
 }
 
@@ -239,6 +243,9 @@ SPECTACULAR_SETTINGS = {
         # same field name, two choice sets.
         "ThreadChannelEnum": "apps.collaboration.models.Thread.Channel",
         "MessageChannelEnum": "apps.collaboration.models.Message.Channel",
+        # Offer.direction (buyer/seller) vs Message/CallLog.direction (inbound/outbound).
+        "OfferDirectionEnum": "apps.crm.models.Offer.Direction",
+        "MessageDirectionEnum": "apps.collaboration.models.Message.Direction",
     },
 }
 

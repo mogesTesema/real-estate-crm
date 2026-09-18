@@ -184,3 +184,50 @@ class SavedSearchAlert(models.Model):
 
     class Meta:
         db_table = "crm_saved_search_alert"
+
+
+class CampaignEnrollment(models.Model):
+    """Per-lead drip state (SRS 3.8.1) — v3.4's one schema addition.
+
+    Why a table and not `Lead.custom_data`: the drip runner claims work by
+    `next_send_at` — that needs an index; JSON state would race concurrent user edits of
+    the lead; and custom_data belongs to the custom-field registry, which validates its
+    keys. `CampaignMetric` is a day-aggregate and cannot hold per-lead position either.
+
+    `next_send_at` is the claim key: the runner selects due ACTIVE rows FOR UPDATE
+    SKIP LOCKED, so two overlapping runs never double-send a step.
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = "ACTIVE", "Active"
+        COMPLETED = "COMPLETED", "Completed"
+        EXITED = "EXITED", "Exited"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    campaign = models.ForeignKey(
+        Campaign, on_delete=models.CASCADE, related_name="enrollments"
+    )
+    lead = models.ForeignKey(
+        "crm.Lead", on_delete=models.CASCADE, related_name="campaign_enrollments"
+    )
+    current_step = models.IntegerField(default=0)  # last step_order sent; 0 = none yet
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.ACTIVE
+    )
+    next_send_at = models.DateTimeField(null=True, blank=True)
+    enrolled_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "crm_campaign_enrollment"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["campaign", "lead"], name="crm_campaign_enrollment_uniq"
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["status", "next_send_at"],
+                name="crm_enrollment_claim_idx",
+            )
+        ]

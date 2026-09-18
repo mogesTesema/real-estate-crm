@@ -411,3 +411,228 @@ class EndFieldSessionSerializer(serializers.Serializer):
 
 class AppendPointsSerializer(serializers.Serializer):
     points = LocationPointSerializer(many=True)
+
+
+# --- Offers / transactions / checklists (SRS 3.6) -------------------------------------------
+
+
+class OfferSerializer(serializers.ModelSerializer):
+    offered_by_contact = ContactSummarySerializer(read_only=True)
+
+    class Meta:
+        from ..models import Offer
+
+        model = Offer
+        fields = (
+            "id", "deal", "property", "parent_offer", "offered_by_contact", "direction",
+            "amount", "deposit_amount", "conditions", "expires_at", "status",
+            "submitted_at", "responded_at",
+        )
+        read_only_fields = fields  # writes go through the services
+
+
+class OfferCreateSerializer(serializers.Serializer):
+    deal = serializers.UUIDField()
+    property = serializers.UUIDField(required=False, allow_null=True)
+    offered_by_contact = serializers.UUIDField(required=False, allow_null=True)
+    direction = serializers.ChoiceField(
+        choices=(("BUYER_TO_SELLER", "Buyer to seller"), ("SELLER_TO_BUYER", "Seller to buyer"))
+    )
+    amount = serializers.DecimalField(max_digits=15, decimal_places=2)
+    deposit_amount = serializers.DecimalField(
+        max_digits=15, decimal_places=2, required=False, allow_null=True
+    )
+    conditions = serializers.JSONField(required=False)
+    expires_at = serializers.DateTimeField(required=False, allow_null=True)
+    submit = serializers.BooleanField(required=False, default=True)
+
+
+class CounterOfferSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=15, decimal_places=2)
+    deposit_amount = serializers.DecimalField(
+        max_digits=15, decimal_places=2, required=False, allow_null=True
+    )
+    conditions = serializers.JSONField(required=False)
+    expires_at = serializers.DateTimeField(required=False, allow_null=True)
+    offered_by_contact = serializers.UUIDField(required=False, allow_null=True)
+
+
+class TransactionSerializer(serializers.ModelSerializer):
+    class Meta:
+        from ..models import Transaction
+
+        model = Transaction
+        fields = (
+            "id", "deal", "property", "transaction_type", "reference_code",
+            "gross_amount", "currency", "transaction_date", "closing_date",
+            "contract_date", "status", "notes", "created_at", "updated_at",
+        )
+        read_only_fields = fields  # created by mark_deal_won, moved by the status action
+
+
+class TransactionStatusSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    reason = serializers.CharField(required=False, allow_blank=True)
+
+
+class ChecklistItemSerializer(serializers.ModelSerializer):
+    completed_by = UserSummarySerializer(read_only=True)
+
+    class Meta:
+        from ..models import ClosingChecklistItem
+
+        model = ClosingChecklistItem
+        fields = (
+            "id", "title", "description", "is_required", "is_completed", "completed_by",
+            "completed_at", "due_date", "document", "sort_order",
+        )
+        read_only_fields = ("id", "is_completed", "completed_by", "completed_at", "document")
+
+
+class ClosingChecklistSerializer(serializers.ModelSerializer):
+    items = ChecklistItemSerializer(many=True, read_only=True)
+
+    class Meta:
+        from ..models import ClosingChecklist
+
+        model = ClosingChecklist
+        fields = (
+            "id", "deal", "transaction", "checklist_type", "name", "status", "items",
+            "created_at", "updated_at",
+        )
+        read_only_fields = ("id", "status", "created_at", "updated_at")
+
+
+class ChecklistItemInputSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=200)
+    description = serializers.CharField(required=False, allow_blank=True)
+    is_required = serializers.BooleanField(required=False, default=True)
+    due_date = serializers.DateField(required=False, allow_null=True)
+    sort_order = serializers.IntegerField(required=False)
+
+
+class ChecklistCreateSerializer(serializers.Serializer):
+    deal = serializers.UUIDField(required=False, allow_null=True)
+    transaction = serializers.UUIDField(required=False, allow_null=True)
+    checklist_type = serializers.CharField()
+    name = serializers.CharField(max_length=200)
+    items = ChecklistItemInputSerializer(many=True, required=False)
+
+
+class CompleteItemSerializer(serializers.Serializer):
+    document = serializers.UUIDField(required=False, allow_null=True)
+
+
+class ListingMatchCardSerializer(serializers.Serializer):
+    """The safe card a match is shown on: no agents, no commission, no exact address, no
+    custom data. Deliberately the same shape the public site uses."""
+
+    id = serializers.UUIDField(read_only=True)
+    title = serializers.CharField(read_only=True)
+    listing_type = serializers.CharField(read_only=True)
+    asking_price = serializers.DecimalField(
+        max_digits=15, decimal_places=2, read_only=True, allow_null=True
+    )
+    rent_amount = serializers.DecimalField(
+        max_digits=15, decimal_places=2, read_only=True, allow_null=True
+    )
+    available_from = serializers.DateField(read_only=True, allow_null=True)
+    published_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    city = serializers.CharField(source="property.city", read_only=True)
+    bedrooms = serializers.IntegerField(
+        source="property.bedrooms", read_only=True, allow_null=True
+    )
+    bathrooms = serializers.IntegerField(
+        source="property.bathrooms", read_only=True, allow_null=True
+    )
+    property_type = serializers.CharField(
+        source="property.property_type.name", read_only=True
+    )
+
+
+# --- Marketing (SRS §3.8) -------------------------------------------------------------------
+
+
+class CampaignStepSerializer(serializers.ModelSerializer):
+    class Meta:
+        from ..models import CampaignStep
+
+        model = CampaignStep
+        fields = (
+            "id", "step_order", "channel", "delay_days", "template", "subject", "body",
+            "is_active",
+        )
+        read_only_fields = ("id",)
+
+
+class CampaignSerializer(serializers.ModelSerializer):
+    steps = CampaignStepSerializer(many=True, read_only=True)
+    owner = UserSummarySerializer(read_only=True)
+
+    class Meta:
+        from ..models import Campaign
+
+        model = Campaign
+        fields = (
+            "id", "name", "campaign_type", "description", "budget", "start_date",
+            "end_date", "status", "owner", "steps", "created_at", "updated_at",
+        )
+        read_only_fields = ("id", "owner", "created_at", "updated_at")
+
+
+class CampaignMetricSerializer(serializers.ModelSerializer):
+    class Meta:
+        from ..models import CampaignMetric
+
+        model = CampaignMetric
+        fields = (
+            "id", "metric_date", "impressions", "clicks", "leads_generated",
+            "conversions", "cost", "revenue",
+        )
+        read_only_fields = ("id",)
+
+
+class MetricDeltaSerializer(serializers.Serializer):
+    metric_date = serializers.DateField()
+    impressions = serializers.IntegerField(required=False)
+    clicks = serializers.IntegerField(required=False)
+    leads_generated = serializers.IntegerField(required=False)
+    conversions = serializers.IntegerField(required=False)
+    cost = serializers.DecimalField(max_digits=15, decimal_places=2, required=False)
+    revenue = serializers.DecimalField(max_digits=15, decimal_places=2, required=False)
+
+
+class EnrollmentSerializer(serializers.ModelSerializer):
+    class Meta:
+        from ..models import CampaignEnrollment
+
+        model = CampaignEnrollment
+        fields = (
+            "id", "campaign", "lead", "current_step", "status", "next_send_at",
+            "enrolled_at", "completed_at",
+        )
+        read_only_fields = fields
+
+
+class LandingPageSerializer(serializers.ModelSerializer):
+    class Meta:
+        from ..models import LandingPage
+
+        model = LandingPage
+        fields = (
+            "id", "campaign", "slug", "title", "content", "form_config", "lead_source",
+            "is_published", "views", "submissions", "created_at", "updated_at",
+        )
+        read_only_fields = ("id", "views", "submissions", "created_at", "updated_at")
+
+
+class SavedSearchAlertSerializer(serializers.ModelSerializer):
+    class Meta:
+        from ..models import SavedSearchAlert
+
+        model = SavedSearchAlert
+        fields = (
+            "id", "contact", "name", "criteria", "frequency", "channel", "is_active",
+            "last_run_at", "created_at",
+        )
+        read_only_fields = ("id", "last_run_at", "created_at")

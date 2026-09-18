@@ -378,6 +378,26 @@ These are **not optional gaps** — schemas appear in their owning sections belo
 10. **Portal eligibility** — `identity_portal_profile` ACTIVE only after completed contract (SRS 3.11.2) (§4).
 11. **Mandatory Property Manager** — `inventory_property.managed_by_id` required (SRS 3.3.10) (§8).
 
+### Changelog — v3.4 (Phase-2 build)
+
+One schema addition, forced by SRS 3.8.1 the same way v3.3's entries were forced:
+
+| # | SRS | Requirement, abridged | v3.3 had | v3.4 adds | § |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 1 | 3.8.1 | automated drip/nurture sequences per lead | `crm_campaign_step` (the sequence), `crm_campaign_metric` (day aggregates) — **no per-lead position** | `crm_campaign_enrollment`: `(campaign_id, lead_id)` unique, `current_step`, `status` ACTIVE/COMPLETED/EXITED, `next_send_at` + index `(status, next_send_at)` | 7 |
+
+Why not `crm_lead.custom_data`: the drip runner claims due work by `next_send_at`
+(`FOR UPDATE SKIP LOCKED`), which needs an index; JSON state would race concurrent user
+edits of the lead row; and `custom_data` belongs to the custom-field registry, which
+validates its keys. `crm_campaign_metric` is a day-aggregate and cannot hold position.
+
+Everything else in Phase 2 was deliberately schema-free: e-sign signer tokens are
+`django.core.signing` payloads (stateless, revoked by envelope status); document versions
+are the integer + the append-only audit trail; application→lease lineage rides in
+`screening_result["lease_id"]`; lease status history is the audit trail via the
+`lease_status_changed` signal; company configuration lives in `identity_company.settings`;
+webhook delivery attempts are `platform_sync_log` rows.
+
 ### Changelog — v3.3 (schema gaps found against the SRS)
 
 v3.2 was implemented faithfully, and the implementation is what exposed these: seven SRS

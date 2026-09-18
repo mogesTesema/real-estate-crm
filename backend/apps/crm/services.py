@@ -11,6 +11,8 @@ be `Contact.objects.create`: normalisation, de-duplication and the role set all 
 that service, and a second creation path would quietly bypass all three.
 """
 import logging
+from datetime import timedelta
+from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -31,6 +33,8 @@ from .models import (
     LeadRoutingRule,
     LeadSource,
     LeadStatusHistory,
+    Offer,
+    Transaction,
 )
 
 logger = logging.getLogger(__name__)
@@ -322,12 +326,21 @@ def capture_lead(
     rule = route_lead(lead, actor=actor) if route else None
 
     _start_sla_clock(lead)
-    LeadStatusHistory.objects.create(
-        lead=lead, from_status=None, to_status=lead.status, changed_by=actor,
-        reason="Captured.",
-    )
+    if actor is not None:
+        # `changed_by` is NOT NULL by design — history rows name a person. An anonymous
+        # public capture has no person; the CREATE audit event (actor null) is its record.
+        LeadStatusHistory.objects.create(
+            lead=lead, from_status=None, to_status=lead.status, changed_by=actor,
+            reason="Captured.",
+        )
     if acknowledge:
         send_acknowledgment(lead)
+
+    if lead.campaign_id:
+        # SRS 3.8.5 — campaign attribution counts at the moment of capture.
+        record_campaign_metric(
+            lead.campaign, timezone.localdate(), leads_generated=1
+        )
 
     signals.lead_captured.send_robust(
         sender=None, lead=lead, actor=actor, assigned_to=lead.assigned_agent, rule=rule
@@ -705,6 +718,10 @@ def move_stage(deal, stage, *, actor, reason, next_action=None):
     DealStageHistory.objects.create(
         deal=deal, from_stage=previous, to_stage=stage, changed_by=actor,
         reason=reason, next_action=next_action,
+    )
+    signals.deal_stage_moved.send_robust(
+        sender=None, deal=deal, actor=actor, from_stage=previous, to_stage=stage,
+        reason=reason,
     )
     if stage.is_won:
         # §1.2: "Sale deal won: crm.services.mark_deal_won → finance". Same transaction as
@@ -1126,3 +1143,787 @@ def read_location_trail(session, *, actor):
             sender=None, session=session, actor=actor, point_count=len(points)
         )
     return points
+
+
+# --- Offers (SRS 3.6.1) ---------------------------------------------------------------------
+#
+# An offer is never edited into a new amount — that would erase the negotiation history.
+# A wrong offer is withdrawn or countered. COUNTERED is terminal: the child supersedes it.
+
+OFFER_TRANSITIONS = {
+    Offer.Status.DRAFT: {Offer.Status.SUBMITTED, Offer.Status.WITHDRAWN},
+    Offer.Status.SUBMITTED: {
+        Offer.Status.COUNTERED, Offer.Status.ACCEPTED, Offer.Status.REJECTED,
+        Offer.Status.EXPIRED, Offer.Status.WITHDRAWN,
+    },
+    Offer.Status.COUNTERED: set(),
+    Offer.Status.ACCEPTED: set(),
+    Offer.Status.REJECTED: set(),
+    Offer.Status.EXPIRED: set(),
+    Offer.Status.WITHDRAWN: set(),
+}
+
+#: Statuses in which a negotiation is still live on the deal.
+OPEN_OFFER_STATUSES = (Offer.Status.DRAFT, Offer.Status.SUBMITTED)
+
+
+def _move_offer(offer, new_status):
+    allowed = OFFER_TRANSITIONS.get(offer.status, set())
+    if new_status not in allowed:
+        raise ValidationError(
+            {"status": f"Cannot move an offer from {offer.status} to {new_status}."}
+        )
+    offer.status = new_status
+
+
+@transaction.atomic
+def create_offer(*, actor, deal, amount, direction, property=None,
+                 offered_by_contact=None, deposit_amount=None, conditions=None,
+                 expires_at=None, submit=True):
+    """A new offer on a deal. `submit=False` keeps it DRAFT while terms are typed up."""
+    from .models import DealProperty
+
+    if amount is None or Decimal(amount) <= 0:
+        raise ValidationError({"amount": "An offer is a positive amount."})
+    if property is None:
+        primary = (
+            DealProperty.objects.filter(deal=deal)
+            .order_by("-is_primary", "created_at")
+            .select_related("property")
+            .first()
+        )
+        if primary is None:
+            raise ValidationError(
+                {"property": "Link a property to the deal before recording offers on it."}
+            )
+        property = primary.property
+    offered_by_contact = offered_by_contact or deal.primary_contact
+    if offered_by_contact is None:
+        raise ValidationError({"offered_by_contact": "Who is making this offer?"})
+
+    offer = Offer.objects.create(
+        deal=deal,
+        property=property,
+        offered_by_contact=offered_by_contact,
+        direction=direction,
+        amount=amount,
+        deposit_amount=deposit_amount,
+        conditions=conditions or {},
+        expires_at=expires_at,
+        status=Offer.Status.SUBMITTED if submit else Offer.Status.DRAFT,
+        submitted_at=timezone.now(),
+    )
+    return offer
+
+
+@transaction.atomic
+def submit_offer(offer, *, actor):
+    _move_offer(offer, Offer.Status.SUBMITTED)
+    offer.submitted_at = timezone.now()
+    offer.save(update_fields=["status", "submitted_at"])
+    return offer
+
+
+@transaction.atomic
+def withdraw_offer(offer, *, actor):
+    _move_offer(offer, Offer.Status.WITHDRAWN)
+    offer.responded_at = timezone.now()
+    offer.save(update_fields=["status", "responded_at"])
+    return offer
+
+
+@transaction.atomic
+def reject_offer(offer, *, actor):
+    _move_offer(offer, Offer.Status.REJECTED)
+    offer.responded_at = timezone.now()
+    offer.save(update_fields=["status", "responded_at"])
+    return offer
+
+
+@transaction.atomic
+def counter_offer(offer, *, actor, amount, deposit_amount=None, conditions=None,
+                  expires_at=None, offered_by_contact=None):
+    """Respond to a SUBMITTED offer with a counter: a NEW row chained by `parent_offer`,
+    direction flipped, parent marked COUNTERED (terminal — the child supersedes it)."""
+    _move_offer(offer, Offer.Status.COUNTERED)
+    offer.responded_at = timezone.now()
+    offer.save(update_fields=["status", "responded_at"])
+
+    flipped = (
+        Offer.Direction.SELLER_TO_BUYER
+        if offer.direction == Offer.Direction.BUYER_TO_SELLER
+        else Offer.Direction.BUYER_TO_SELLER
+    )
+    if amount is None or Decimal(amount) <= 0:
+        raise ValidationError({"amount": "A counter is a positive amount."})
+    return Offer.objects.create(
+        deal=offer.deal,
+        property=offer.property,
+        parent_offer=offer,
+        offered_by_contact=offered_by_contact or offer.offered_by_contact,
+        direction=flipped,
+        amount=amount,
+        deposit_amount=deposit_amount,
+        conditions=conditions or {},
+        expires_at=expires_at,
+        status=Offer.Status.SUBMITTED,
+        submitted_at=timezone.now(),
+    )
+
+
+@transaction.atomic
+def accept_offer(offer, *, actor):
+    """Accept a SUBMITTED offer — and reject every other open offer on the deal. Two live
+    offers after an acceptance would let a second acceptance contradict the first; chain
+    ancestors are already terminal (COUNTERED).
+
+    Acceptance does NOT move the deal stage (3.4.4's mandatory reason stays a human act)
+    and does NOT create the Transaction — `mark_deal_won` owns that and reads the accepted
+    offer for the gross amount.
+    """
+    _move_offer(offer, Offer.Status.ACCEPTED)
+    offer.responded_at = timezone.now()
+    offer.save(update_fields=["status", "responded_at"])
+    now = timezone.now()
+    Offer.objects.filter(
+        deal=offer.deal, status__in=OPEN_OFFER_STATUSES
+    ).exclude(pk=offer.pk).update(status=Offer.Status.REJECTED, responded_at=now)
+    signals.offer_accepted.send_robust(sender=None, offer=offer, actor=actor)
+    return offer
+
+
+def sweep_offers(now=None):
+    """Expire stale SUBMITTED offers. Status is the idempotency key."""
+    now = now or timezone.now()
+    expired = list(
+        Offer.objects.filter(
+            status=Offer.Status.SUBMITTED, expires_at__isnull=False, expires_at__lt=now
+        ).values_list("pk", flat=True)
+    )
+    if expired:
+        Offer.objects.filter(pk__in=expired).update(
+            status=Offer.Status.EXPIRED, responded_at=now
+        )
+    return expired
+
+
+# --- Transactions (SRS 3.6.6) ---------------------------------------------------------------
+
+TRANSACTION_TRANSITIONS = {
+    Transaction.Status.PENDING: {
+        Transaction.Status.CONTRACTED, Transaction.Status.CANCELLED,
+    },
+    Transaction.Status.CONTRACTED: {
+        Transaction.Status.PARTIALLY_PAID, Transaction.Status.COMPLETED,
+        Transaction.Status.CANCELLED,
+    },
+    Transaction.Status.PARTIALLY_PAID: {
+        Transaction.Status.COMPLETED, Transaction.Status.CANCELLED,
+    },
+    Transaction.Status.COMPLETED: set(),
+    Transaction.Status.CANCELLED: set(),
+}
+
+
+def _incomplete_required_items(transaction_obj):
+    from .models import ClosingChecklist, ClosingChecklistItem
+
+    checklists = ClosingChecklist.objects.filter(
+        Q(transaction=transaction_obj)
+        | Q(deal__isnull=False, deal=transaction_obj.deal)
+    ).exclude(status=ClosingChecklist.Status.CANCELLED)
+    return ClosingChecklistItem.objects.filter(
+        checklist__in=checklists, is_required=True, is_completed=False
+    )
+
+
+@transaction.atomic
+def change_transaction_status(transaction_obj, new_status, *, actor, reason=None):
+    """The transaction lifecycle. COMPLETED is gated (SRS 3.6.6): every required item on
+    every attached non-cancelled closing checklist must be complete first. Cancellation
+    requires a reason, appended to the notes so the record explains itself."""
+    if new_status not in TRANSACTION_TRANSITIONS:
+        raise ValidationError({"status": f"Unknown transaction status {new_status!r}."})
+    allowed = TRANSACTION_TRANSITIONS.get(transaction_obj.status, set())
+    if new_status not in allowed:
+        raise ValidationError(
+            {"status": (
+                f"Cannot move a transaction from {transaction_obj.status} to {new_status}."
+            )}
+        )
+
+    if new_status == Transaction.Status.COMPLETED:
+        missing = _incomplete_required_items(transaction_obj)
+        if missing.exists():
+            titles = list(missing.values_list("title", flat=True)[:5])
+            raise ValidationError(
+                {"status": (
+                    "Closing checklist items are still open: " + ", ".join(titles)
+                )}
+            )
+    if new_status == Transaction.Status.CANCELLED and not (reason or "").strip():
+        raise ValidationError({"reason": "Cancelling a transaction needs a reason."})
+
+    previous = transaction_obj.status
+    transaction_obj.status = new_status
+    fields = ["status", "updated_by", "updated_at"]
+    if new_status == Transaction.Status.CONTRACTED and not transaction_obj.contract_date:
+        transaction_obj.contract_date = timezone.localdate()
+        fields.append("contract_date")
+    if new_status == Transaction.Status.COMPLETED and not transaction_obj.closing_date:
+        transaction_obj.closing_date = timezone.localdate()
+        fields.append("closing_date")
+    if new_status == Transaction.Status.CANCELLED:
+        stamp = f"[{timezone.localdate().isoformat()}] Cancelled: {reason.strip()}"
+        transaction_obj.notes = (
+            f"{transaction_obj.notes}\n{stamp}" if transaction_obj.notes else stamp
+        )
+        fields.append("notes")
+    transaction_obj.updated_by = actor
+    transaction_obj.save(update_fields=fields)
+    signals.transaction_status_changed.send_robust(
+        sender=None, transaction_obj=transaction_obj, actor=actor,
+        from_status=previous, to_status=new_status,
+    )
+    return transaction_obj
+
+
+# --- Closing checklists (SRS 3.6.6) ---------------------------------------------------------
+
+_CHECKLIST_ITEM_FIELDS = frozenset(
+    {"title", "description", "is_required", "due_date", "sort_order"}
+)
+
+
+@transaction.atomic
+def create_checklist(*, actor, checklist_type, name, deal=None, transaction_obj=None,
+                     items=()):
+    from .models import ClosingChecklist, ClosingChecklistItem
+
+    if deal is None and transaction_obj is None:
+        raise ValidationError(
+            {"deal": "A checklist attaches to a deal or a transaction."}
+        )
+    if checklist_type not in set(ClosingChecklist.ChecklistType.values):
+        raise ValidationError({"checklist_type": "Unknown checklist type."})
+    checklist = ClosingChecklist.objects.create(
+        deal=deal, transaction=transaction_obj, checklist_type=checklist_type, name=name,
+        created_by=actor, updated_by=actor,
+    )
+    for index, item in enumerate(items):
+        unknown = set(item) - _CHECKLIST_ITEM_FIELDS
+        if unknown:
+            raise ValidationError(
+                {"items": f"Unknown item fields: {sorted(unknown)}"}
+            )
+        ClosingChecklistItem.objects.create(
+            checklist=checklist, sort_order=item.get("sort_order", index), **{
+                k: v for k, v in item.items() if k != "sort_order"
+            },
+        )
+    return checklist
+
+
+@transaction.atomic
+def add_checklist_item(checklist, *, actor, **fields):
+    from .models import ClosingChecklist, ClosingChecklistItem
+
+    if checklist.status != ClosingChecklist.Status.OPEN:
+        raise ValidationError({"detail": "This checklist is closed."})
+    unknown = set(fields) - _CHECKLIST_ITEM_FIELDS
+    if unknown:
+        raise ValidationError({name: "Not an item field." for name in unknown})
+    if not (fields.get("title") or "").strip():
+        raise ValidationError({"title": "An item needs a title."})
+    if "sort_order" not in fields:
+        fields["sort_order"] = checklist.items.count()
+    return ClosingChecklistItem.objects.create(checklist=checklist, **fields)
+
+
+@transaction.atomic
+def complete_checklist_item(item, *, actor, document=None):
+    """Tick one line, optionally attaching the document that satisfies it."""
+    from .models import ClosingChecklist
+
+    if item.checklist.status != ClosingChecklist.Status.OPEN:
+        raise ValidationError({"detail": "This checklist is closed."})
+    item.is_completed = True
+    item.completed_by = actor
+    item.completed_at = timezone.now()
+    if document is not None:
+        item.document = document
+    item.save(update_fields=["is_completed", "completed_by", "completed_at", "document"])
+    return item
+
+
+@transaction.atomic
+def reopen_checklist_item(item, *, actor):
+    from .models import ClosingChecklist
+
+    if item.checklist.status != ClosingChecklist.Status.OPEN:
+        raise ValidationError({"detail": "This checklist is closed."})
+    item.is_completed = False
+    item.completed_by = None
+    item.completed_at = None
+    item.save(update_fields=["is_completed", "completed_by", "completed_at"])
+    return item
+
+
+@transaction.atomic
+def complete_checklist(checklist, *, actor):
+    from .models import ClosingChecklist
+
+    if checklist.status != ClosingChecklist.Status.OPEN:
+        raise ValidationError({"status": "Only an open checklist completes."})
+    open_required = checklist.items.filter(is_required=True, is_completed=False)
+    if open_required.exists():
+        titles = list(open_required.values_list("title", flat=True)[:5])
+        raise ValidationError(
+            {"status": "Required items are still open: " + ", ".join(titles)}
+        )
+    checklist.status = ClosingChecklist.Status.COMPLETED
+    checklist.updated_by = actor
+    checklist.save(update_fields=["status", "updated_by", "updated_at"])
+    return checklist
+
+
+@transaction.atomic
+def cancel_checklist(checklist, *, actor):
+    from .models import ClosingChecklist
+
+    if checklist.status != ClosingChecklist.Status.OPEN:
+        raise ValidationError({"status": "Only an open checklist cancels."})
+    checklist.status = ClosingChecklist.Status.CANCELLED
+    checklist.updated_by = actor
+    checklist.save(update_fields=["status", "updated_by", "updated_at"])
+    return checklist
+
+
+# --- Marketing: campaigns, drip, landing pages, alerts (SRS §3.8) ---------------------------
+
+_CAMPAIGN_FIELDS = frozenset(
+    {"name", "campaign_type", "description", "budget", "start_date", "end_date",
+     "status", "owner"}
+)
+_STEP_FIELDS = frozenset(
+    {"step_order", "channel", "delay_days", "template", "subject", "body", "is_active"}
+)
+
+
+@transaction.atomic
+def create_campaign(*, actor, name, campaign_type, start_date, **fields):
+    from .models import Campaign
+
+    unknown = set(fields) - (_CAMPAIGN_FIELDS - {"name", "campaign_type", "start_date"})
+    if unknown:
+        raise ValidationError({name_: "Not a campaign field." for name_ in unknown})
+    fields.setdefault("status", "DRAFT")
+    fields.setdefault("owner", actor)
+    return Campaign.objects.create(
+        name=name, campaign_type=campaign_type, start_date=start_date, **fields
+    )
+
+
+@transaction.atomic
+def update_campaign(campaign, *, actor, **fields):
+    unknown = set(fields) - _CAMPAIGN_FIELDS
+    if unknown:
+        raise ValidationError({name: "Not a campaign field." for name in unknown})
+    for name, value in fields.items():
+        setattr(campaign, name, value)
+    campaign.save()
+    return campaign
+
+
+@transaction.atomic
+def add_campaign_step(campaign, *, actor, step_order, channel, **fields):
+    from .models import CampaignStep
+
+    unknown = set(fields) - (_STEP_FIELDS - {"step_order", "channel"})
+    if unknown:
+        raise ValidationError({name: "Not a step field." for name in unknown})
+    template = fields.get("template")
+    if template is not None and template.channel != channel:
+        raise ValidationError({"template": "That template is for a different channel."})
+    if not template and not (fields.get("body") or "").strip():
+        raise ValidationError({"body": "A step sends a template or an inline body."})
+    return CampaignStep.objects.create(
+        campaign=campaign, step_order=step_order, channel=channel, **fields
+    )
+
+
+@transaction.atomic
+def enroll_lead(campaign, lead, *, actor):
+    """Put a lead on a drip. Re-enrolling an EXITED/COMPLETED lead reactivates from the
+    top — a deliberate restart, not an error."""
+    from .models import CampaignEnrollment
+
+    first_step = campaign.steps.filter(is_active=True).order_by("step_order").first()
+    if first_step is None:
+        raise ValidationError({"campaign": "This campaign has no active steps."})
+    if lead.status in (Lead.Status.CONVERTED, Lead.Status.LOST):
+        raise ValidationError({"lead": "A closed lead does not enter a drip."})
+    enrollment, created = CampaignEnrollment.objects.get_or_create(
+        campaign=campaign, lead=lead,
+        defaults={
+            "status": CampaignEnrollment.Status.ACTIVE,
+            "current_step": 0,
+            "next_send_at": timezone.now() + timedelta(days=first_step.delay_days),
+        },
+    )
+    if not created and enrollment.status != CampaignEnrollment.Status.ACTIVE:
+        enrollment.status = CampaignEnrollment.Status.ACTIVE
+        enrollment.current_step = 0
+        enrollment.completed_at = None
+        enrollment.next_send_at = timezone.now() + timedelta(days=first_step.delay_days)
+        enrollment.save(
+            update_fields=["status", "current_step", "completed_at", "next_send_at"]
+        )
+    return enrollment
+
+
+@transaction.atomic
+def exit_enrollment(enrollment, *, actor):
+    from .models import CampaignEnrollment
+
+    enrollment.status = CampaignEnrollment.Status.EXITED
+    enrollment.next_send_at = None
+    enrollment.save(update_fields=["status", "next_send_at"])
+    return enrollment
+
+
+def record_campaign_metric(campaign, metric_date, **deltas):
+    """Day-unique upsert with F() deltas — a re-run adds nothing twice because callers
+    pass deltas, and concurrent bumps do not lose updates."""
+    from django.db.models import F
+
+    from .models import CampaignMetric
+
+    allowed = {"impressions", "clicks", "leads_generated", "conversions", "cost", "revenue"}
+    unknown = set(deltas) - allowed
+    if unknown:
+        raise ValidationError({name: "Not a metric field." for name in unknown})
+    row, created = CampaignMetric.objects.get_or_create(
+        campaign=campaign, metric_date=metric_date, defaults=deltas
+    )
+    if not created:
+        CampaignMetric.objects.filter(pk=row.pk).update(
+            **{name: F(name) + value for name, value in deltas.items()}
+        )
+        row.refresh_from_db()
+    return row
+
+
+#: How long a failed drip send waits before the runner retries it.
+DRIP_RETRY = timedelta(hours=1)
+
+
+def run_drip(now=None):
+    """Advance every due drip enrollment one step. The claim is `FOR UPDATE SKIP LOCKED`
+    on the `(status, next_send_at)` index, so overlapping runs never double-send.
+
+    A closed lead (CONVERTED/LOST) exits instead of receiving marketing. A send failure
+    advances `next_send_at` by `DRIP_RETRY` without moving `current_step` — the step will
+    be retried, and a poison enrollment cannot wedge the queue.
+    """
+    from apps.collaboration import services as collaboration_services
+
+    from .models import CampaignEnrollment
+
+    now = now or timezone.now()
+    processed = []
+    while True:
+        with transaction.atomic():
+            enrollment = (
+                CampaignEnrollment.objects.select_for_update(skip_locked=True)
+                .filter(
+                    status=CampaignEnrollment.Status.ACTIVE,
+                    next_send_at__isnull=False,
+                    next_send_at__lte=now,
+                )
+                .select_related("campaign", "lead", "lead__contact")
+                .order_by("next_send_at")
+                .first()
+            )
+            if enrollment is None:
+                break
+
+            lead = enrollment.lead
+            if lead.status in (Lead.Status.CONVERTED, Lead.Status.LOST) or lead.deleted_at:
+                enrollment.status = CampaignEnrollment.Status.EXITED
+                enrollment.next_send_at = None
+                enrollment.save(update_fields=["status", "next_send_at"])
+                processed.append((enrollment.pk, "EXITED"))
+                continue
+
+            step = (
+                enrollment.campaign.steps.filter(
+                    is_active=True, step_order__gt=enrollment.current_step
+                )
+                .order_by("step_order")
+                .first()
+            )
+            if step is None:
+                enrollment.status = CampaignEnrollment.Status.COMPLETED
+                enrollment.completed_at = now
+                enrollment.next_send_at = None
+                enrollment.save(update_fields=["status", "completed_at", "next_send_at"])
+                processed.append((enrollment.pk, "COMPLETED"))
+                continue
+
+            try:
+                message = collaboration_services.send_message(
+                    actor=None,
+                    channel=step.channel,
+                    contact=lead.contact,
+                    template=step.template,
+                    subject=step.subject if not step.template else None,
+                    body=step.body if not step.template else None,
+                )
+                failed = message.status == "FAILED"
+            except Exception:  # noqa: BLE001 - a broken step must not wedge the runner
+                logger.exception(
+                    "run_drip: send failed for enrollment %s step %s",
+                    enrollment.pk, step.step_order,
+                )
+                failed = True
+
+            if failed:
+                enrollment.next_send_at = now + DRIP_RETRY
+                enrollment.save(update_fields=["next_send_at"])
+                processed.append((enrollment.pk, "RETRY"))
+                continue
+
+            enrollment.current_step = step.step_order
+            following = (
+                enrollment.campaign.steps.filter(
+                    is_active=True, step_order__gt=step.step_order
+                )
+                .order_by("step_order")
+                .first()
+            )
+            if following is None:
+                enrollment.status = CampaignEnrollment.Status.COMPLETED
+                enrollment.completed_at = now
+                enrollment.next_send_at = None
+                enrollment.save(
+                    update_fields=["current_step", "status", "completed_at", "next_send_at"]
+                )
+            else:
+                enrollment.next_send_at = now + timedelta(days=following.delay_days)
+                enrollment.save(update_fields=["current_step", "next_send_at"])
+            processed.append((enrollment.pk, f"SENT:{step.step_order}"))
+    return processed
+
+
+# --- Landing pages (SRS 3.8.2) --------------------------------------------------------------
+
+_LANDING_FIELDS = frozenset(
+    {"campaign", "slug", "title", "content", "form_config", "lead_source", "is_published"}
+)
+
+
+@transaction.atomic
+def create_landing_page(*, actor, slug, title, **fields):
+    from .models import LandingPage
+
+    unknown = set(fields) - (_LANDING_FIELDS - {"slug", "title"})
+    if unknown:
+        raise ValidationError({name: "Not a landing-page field." for name in unknown})
+    return LandingPage.objects.create(
+        slug=slug, title=title, created_by=actor, updated_by=actor, **fields
+    )
+
+
+@transaction.atomic
+def update_landing_page(page, *, actor, **fields):
+    unknown = set(fields) - _LANDING_FIELDS
+    if unknown:
+        raise ValidationError({name: "Not a landing-page field." for name in unknown})
+    for name, value in fields.items():
+        setattr(page, name, value)
+    page.updated_by = actor
+    page.save()
+    return page
+
+
+@transaction.atomic
+def submit_landing_page(page, *, form_data):
+    """A public form submission → the full `capture_lead` pipeline (dedupe, scoring,
+    routing, SLA, acknowledgment). Counters move by F() so concurrent submissions add up."""
+    from django.db.models import F
+
+    from .models import LandingPage
+
+    required = [
+        field["name"]
+        for field in (page.form_config or {}).get("fields", [])
+        if field.get("required")
+    ]
+    missing = [name for name in required if not (form_data.get(name) or "").strip()]
+    if missing:
+        raise ValidationError({name: "This field is required." for name in missing})
+
+    name = (form_data.get("name") or "").strip()
+    contact_data = {
+        "contact_type": "PERSON",
+        "first_name": form_data.get("first_name")
+        or (name.split(" ")[0] if name else "Web"),
+        "last_name": form_data.get("last_name")
+        or (" ".join(name.split(" ")[1:]) if " " in name else "Visitor"),
+        "email": form_data.get("email") or None,
+        "phone": form_data.get("phone") or None,
+    }
+    if not (contact_data["email"] or contact_data["phone"]):
+        raise ValidationError({"email": "Leave an email or a phone number."})
+
+    lead = capture_lead(
+        actor=None,
+        contact_data=contact_data,
+        lead_type=form_data.get("lead_type") or Lead.LeadType.BUY,
+        source=page.lead_source,
+        campaign=page.campaign,
+        description=form_data.get("message") or None,
+    )
+    LandingPage.objects.filter(pk=page.pk).update(submissions=F("submissions") + 1)
+    return lead
+
+
+# --- Saved-search alerts (SRS 3.8.4) --------------------------------------------------------
+
+#: The criteria keys an alert may save. A whitelist because criteria get replayed into
+#: queryset filters for years after the UI that wrote them has changed.
+ALERT_CRITERIA_KEYS = frozenset(
+    {"listing_type", "min_price", "max_price", "bedrooms", "city", "property_type",
+     "latitude", "longitude", "radius_km"}
+)
+
+_ALERT_FIELDS = frozenset({"name", "criteria", "frequency", "channel", "is_active"})
+
+_ALERT_INTERVALS = {"INSTANT": timedelta(0), "DAILY": timedelta(days=1),
+                    "WEEKLY": timedelta(weeks=1)}
+
+
+def _validate_alert_criteria(criteria):
+    unknown = set(criteria or {}) - ALERT_CRITERIA_KEYS
+    if unknown:
+        raise ValidationError({"criteria": f"Unknown criteria: {sorted(unknown)}"})
+
+
+@transaction.atomic
+def create_saved_search_alert(*, actor, contact, name, frequency, channel, criteria=None):
+    from .models import SavedSearchAlert
+
+    _validate_alert_criteria(criteria)
+    return SavedSearchAlert.objects.create(
+        contact=contact, name=name, frequency=frequency, channel=channel,
+        criteria=criteria or {},
+    )
+
+
+@transaction.atomic
+def update_saved_search_alert(alert, *, actor, **fields):
+    unknown = set(fields) - _ALERT_FIELDS
+    if unknown:
+        raise ValidationError({name: "Not an alert field." for name in unknown})
+    if "criteria" in fields:
+        _validate_alert_criteria(fields["criteria"])
+    for name, value in fields.items():
+        setattr(alert, name, value)
+    alert.save()
+    return alert
+
+
+def _alert_matches(alert, since):
+    """ACTIVE listings matching the saved criteria, newer than `since`."""
+    from decimal import Decimal as D
+
+    from apps.inventory.models import Listing
+    from apps.inventory.selectors import live_listings
+
+    criteria = alert.criteria or {}
+    queryset = live_listings().filter(status=Listing.Status.ACTIVE)
+    if criteria.get("listing_type"):
+        queryset = queryset.filter(listing_type=criteria["listing_type"])
+    if criteria.get("min_price") is not None:
+        floor = D(str(criteria["min_price"]))
+        queryset = queryset.filter(
+            Q(asking_price__gte=floor) | Q(rent_amount__gte=floor)
+        )
+    if criteria.get("max_price") is not None:
+        ceiling = D(str(criteria["max_price"]))
+        queryset = queryset.filter(
+            Q(asking_price__lte=ceiling) | Q(rent_amount__lte=ceiling)
+        )
+    if criteria.get("bedrooms") is not None:
+        queryset = queryset.filter(property__bedrooms__gte=criteria["bedrooms"])
+    if criteria.get("city"):
+        queryset = queryset.filter(property__city__icontains=criteria["city"])
+    if criteria.get("property_type"):
+        queryset = queryset.filter(
+            property__property_type__name__icontains=criteria["property_type"]
+        )
+    if (
+        criteria.get("latitude") is not None
+        and criteria.get("longitude") is not None
+        and criteria.get("radius_km")
+    ):
+        from django.contrib.gis.geos import Point
+        from django.contrib.gis.measure import D as Dist
+
+        centre = Point(
+            float(criteria["longitude"]), float(criteria["latitude"]), srid=4326
+        )
+        queryset = queryset.filter(
+            property__geo_point__dwithin=(centre, Dist(km=float(criteria["radius_km"])))
+        )
+    if since:
+        queryset = queryset.filter(
+            Q(published_at__gte=since) | Q(created_at__gte=since)
+        )
+    return queryset.select_related("property")
+
+
+def run_saved_search_alerts(now=None):
+    """Send new-listing alerts. **`last_run_at` ALWAYS advances**, matches or not, send
+    failure or not — at-most-once delivery, because an alert that retries a window is an
+    alert that spams a client."""
+    from apps.collaboration.gateways import get_gateway
+
+    from .models import SavedSearchAlert
+
+    now = now or timezone.now()
+    sent = []
+    for alert in SavedSearchAlert.objects.filter(is_active=True).select_related("contact"):
+        interval = _ALERT_INTERVALS.get(alert.frequency, timedelta(days=1))
+        if alert.last_run_at and alert.last_run_at + interval > now:
+            continue
+        since = alert.last_run_at
+        matches = list(_alert_matches(alert, since)[:10])
+        # The window closes before the send is attempted: at-most-once.
+        alert.last_run_at = now
+        alert.save(update_fields=["last_run_at"])
+        if not matches:
+            continue
+        address = (
+            alert.contact.email if alert.channel == "EMAIL" else alert.contact.phone
+        )
+        if not address:
+            logger.warning(
+                "saved-search alert %s has no %s address on file", alert.pk, alert.channel
+            )
+            continue
+        lines = [
+            f"- {listing.title} ({listing.asking_price or listing.rent_amount})"
+            for listing in matches
+        ]
+        try:
+            get_gateway(alert.channel).send(
+                to_address=address,
+                subject=f"New listings for your search: {alert.name}",
+                body="New matches:\n" + "\n".join(lines),
+            )
+            sent.append(alert.pk)
+        except Exception:  # noqa: BLE001 - the window already advanced; log and move on
+            logger.exception("saved-search alert %s failed to send", alert.pk)
+    return sent

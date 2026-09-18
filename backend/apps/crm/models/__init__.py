@@ -31,6 +31,7 @@ from .leads import (
 )
 from .marketing import (
     Campaign,
+    CampaignEnrollment,
     CampaignMetric,
     CampaignStep,
     LandingPage,
@@ -43,6 +44,7 @@ __all__ = [
     "AgentFieldSession",
     "AgentLocationPoint",
     "Campaign",
+    "CampaignEnrollment",
     "CampaignMetric",
     "CampaignStep",
     "ClosingChecklist",

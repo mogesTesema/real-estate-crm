@@ -449,6 +449,47 @@ def on_statement_issued(sender, *, statement, actor, **kwargs):
     )
 
 
+def on_deal_stage_moved(sender, *, deal, actor, from_stage, to_stage, reason, **kwargs):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type="DEAL",
+        entity_id=deal.pk,
+        actor=actor,
+        old_values={"stage": from_stage.name},
+        new_values={"stage": to_stage.name, "reason": reason, "status": deal.status},
+    )
+
+
+def on_offer_accepted(sender, *, offer, actor, **kwargs):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type="DEAL",
+        entity_id=offer.deal_id,
+        actor=actor,
+        new_values={
+            "offer_id": str(offer.pk),
+            "accepted_amount": str(offer.amount),
+            "direction": offer.direction,
+        },
+    )
+
+
+def on_transaction_status_changed(
+    sender, *, transaction_obj, actor, from_status, to_status, **kwargs
+):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type="DEAL",
+        entity_id=transaction_obj.deal_id or transaction_obj.pk,
+        actor=actor,
+        old_values={"transaction_status": from_status},
+        new_values={
+            "transaction_status": to_status,
+            "transaction": transaction_obj.reference_code,
+        },
+    )
+
+
 _WIRING = (
     (property_ops_signals.lease_created, on_lease_created),
     (property_ops_signals.lease_status_changed, on_lease_status_changed),
@@ -468,6 +509,9 @@ _WIRING = (
     (crm_signals.lead_assigned, on_lead_assigned),
     (crm_signals.lead_converted, on_lead_converted),
     (crm_signals.gps_track_accessed, on_gps_track_accessed),
+    (crm_signals.deal_stage_moved, on_deal_stage_moved),
+    (crm_signals.offer_accepted, on_offer_accepted),
+    (crm_signals.transaction_status_changed, on_transaction_status_changed),
     (inventory_signals.status_changed, on_status_changed),
     (inventory_signals.listing_status_changed, on_listing_status_changed),
     (contact_signals.contacts_merged, on_contacts_merged),
