@@ -7,7 +7,9 @@ shell and an import too.
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from apps.core.choices import ScopedEntityType
 from apps.core.serializers import UserSummarySerializer
+from apps.identity.field_access import FieldPermissionSerializerMixin
 
 from ..models import (
     Building,
@@ -129,7 +131,9 @@ class UnitSerializer(serializers.ModelSerializer):
         read_only_fields = ("id", "status", "created_at", "updated_at")
 
 
-class PropertySerializer(serializers.ModelSerializer):
+class PropertySerializer(FieldPermissionSerializerMixin, serializers.ModelSerializer):
+    field_permission_entity = ScopedEntityType.PROPERTY
+
     managed_by = UserSummarySerializer(read_only=True)
     owners = PropertyOwnerSerializer(many=True, read_only=True)
     primary_media = serializers.SerializerMethodField()
@@ -166,7 +170,9 @@ class PropertySerializer(serializers.ModelSerializer):
         return round(distance.km, 3) if distance is not None else None
 
 
-class PropertyWriteSerializer(serializers.ModelSerializer):
+class PropertyWriteSerializer(FieldPermissionSerializerMixin, serializers.ModelSerializer):
+    field_permission_entity = ScopedEntityType.PROPERTY
+
     class Meta:
         model = Property
         fields = (
@@ -202,7 +208,9 @@ class PropertyWriteSerializer(serializers.ModelSerializer):
         }
 
 
-class ListingSerializer(serializers.ModelSerializer):
+class ListingSerializer(FieldPermissionSerializerMixin, serializers.ModelSerializer):
+    field_permission_entity = ScopedEntityType.LISTING
+
     assigned_agent = UserSummarySerializer(read_only=True)
     co_listing_agent = UserSummarySerializer(read_only=True)
     property_title = serializers.CharField(source="property.title", read_only=True)
@@ -213,7 +221,9 @@ class ListingSerializer(serializers.ModelSerializer):
         read_only_fields = ("id", "reference_code", "status", "published_at", "created_at")
 
 
-class ListingWriteSerializer(serializers.ModelSerializer):
+class ListingWriteSerializer(FieldPermissionSerializerMixin, serializers.ModelSerializer):
+    field_permission_entity = ScopedEntityType.LISTING
+
     class Meta:
         model = Listing
         fields = (

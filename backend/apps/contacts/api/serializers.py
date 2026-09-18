@@ -7,7 +7,9 @@ services module, not by convention here.
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from apps.core.choices import ScopedEntityType
 from apps.core.serializers import UserSummarySerializer
+from apps.identity.field_access import FieldPermissionSerializerMixin
 
 from ..models import Consent, Contact, ContactRelationship, ContactRole
 from ..services import IMPORTABLE_FIELDS
@@ -61,7 +63,9 @@ class ContactSummarySerializer(serializers.ModelSerializer):
         fields = ("id", "display_name", "contact_type", "email", "phone")
 
 
-class ContactSerializer(serializers.ModelSerializer):
+class ContactSerializer(FieldPermissionSerializerMixin, serializers.ModelSerializer):
+    field_permission_entity = ScopedEntityType.CONTACT
+
     display_name = serializers.CharField(source="__str__", read_only=True)
     roles = serializers.SerializerMethodField()
     assigned_agent = UserSummarySerializer(read_only=True)
@@ -113,7 +117,9 @@ class ContactSerializer(serializers.ModelSerializer):
         return sorted(role.role for role in obj.roles.all())
 
 
-class ContactWriteSerializer(serializers.ModelSerializer):
+class ContactWriteSerializer(FieldPermissionSerializerMixin, serializers.ModelSerializer):
+    field_permission_entity = ScopedEntityType.CONTACT
+
     """Create / update payload.
 
     `email` and `phone` are plain CharFields rather than the model's EmailField: normalisation

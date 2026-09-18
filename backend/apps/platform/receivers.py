@@ -532,6 +532,18 @@ def _webhooks(event_type, payload):
     dispatch_webhooks(event_type, payload)
 
 
+def on_role_permission_changed(sender, *, role, permission_code, granted, actor, **kwargs):
+    record_event(
+        action=AuditEvent.Action.UPDATE,
+        entity_type="ROLE",
+        entity_id=role.pk,
+        actor=actor,
+        new_values=(
+            {"granted": permission_code} if granted else {"revoked": permission_code}
+        ),
+    )
+
+
 _WIRING = (
     (property_ops_signals.lease_created, on_lease_created),
     (property_ops_signals.lease_status_changed, on_lease_status_changed),
@@ -563,6 +575,7 @@ _WIRING = (
     (signals.user_registered, on_user_registered),
     (signals.role_assigned, on_role_assigned),
     (signals.role_revoked, on_role_revoked),
+    (signals.role_permission_changed, on_role_permission_changed),
     (signals.user_deactivated, on_user_deactivated),
     (signals.user_reactivated, on_user_reactivated),
     (signals.portal_access_granted, on_portal_access_granted),

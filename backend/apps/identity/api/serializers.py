@@ -295,3 +295,58 @@ class PortalAccessSerializer(serializers.Serializer):
                 }
             )
         return attrs
+
+
+# --- Permission-matrix admin (SRS 3.17.1/3.17.2) --------------------------------------------
+
+
+class PermissionSerializer(serializers.ModelSerializer):
+    class Meta:
+        from ..models import Permission
+
+        model = Permission
+        fields = ("id", "code", "module", "action", "description")
+        read_only_fields = fields  # the catalogue is seeded, not typed in
+
+
+class RolePermissionSerializer(serializers.ModelSerializer):
+    permission_code = serializers.CharField(source="permission.code", read_only=True)
+
+    class Meta:
+        from ..models import RolePermission
+
+        model = RolePermission
+        fields = ("id", "role", "permission", "permission_code")
+        read_only_fields = ("id", "permission_code")
+
+
+class FieldPermissionSerializer(serializers.ModelSerializer):
+    class Meta:
+        from ..models import FieldPermission
+
+        model = FieldPermission
+        fields = ("id", "role", "entity_type", "field_name", "access_level")
+        read_only_fields = ("id",)
+
+
+class CustomFieldSerializer(serializers.ModelSerializer):
+    class Meta:
+        from apps.core.models import CustomField
+
+        model = CustomField
+        fields = (
+            "id", "entity_type", "key", "label", "data_type", "choices",
+            "is_required", "is_active", "sort_order", "created_at",
+        )
+        read_only_fields = ("id", "created_at")
+
+    def validate(self, attrs):
+        data_type = attrs.get(
+            "data_type", getattr(self.instance, "data_type", None)
+        )
+        choices = attrs.get("choices", getattr(self.instance, "choices", None))
+        if data_type in ("SINGLE_SELECT", "MULTI_SELECT") and not choices:
+            raise serializers.ValidationError(
+                {"choices": "A select field needs its options."}
+            )
+        return attrs

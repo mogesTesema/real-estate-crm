@@ -179,9 +179,13 @@ class AuditEventViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
 
 class _AgencyAdminViewSet(viewsets.GenericViewSet):
     def get_permissions(self):
-        from apps.identity.permissions import AgencyAdminOnly
+        from apps.identity.permissions import AgencyAdminOnly, HasPermission
 
-        return [*super().get_permissions(), AgencyAdminOnly()]
+        return [
+            *super().get_permissions(),
+            AgencyAdminOnly(),
+            HasPermission("integrations.manage")(),
+        ]
 
 
 class ConnectionViewSet(
@@ -286,7 +290,12 @@ class SavedReportViewSet(viewsets.ModelViewSet):
     ordering = ["name"]
 
     def get_permissions(self):
-        return [*super().get_permissions(), IsStaff()]
+        from apps.identity.permissions import HasPermission
+
+        base = [*super().get_permissions(), IsStaff()]
+        if self.request.method not in ("GET", "HEAD", "OPTIONS") or self.action == "run":
+            base.append(HasPermission("reports.build")())
+        return base
 
     def get_queryset(self):
         from apps.identity.selectors import apply_scope
@@ -357,7 +366,12 @@ class ReportScheduleViewSet(viewsets.ModelViewSet):
     ordering = ["next_run_at"]
 
     def get_permissions(self):
-        return [*super().get_permissions(), IsStaff()]
+        from apps.identity.permissions import HasPermission
+
+        base = [*super().get_permissions(), IsStaff()]
+        if self.request.method not in ("GET", "HEAD", "OPTIONS"):
+            base.append(HasPermission("reports.schedule")())
+        return base
 
     def get_queryset(self):
         """A schedule is visible with its report; only creators and admins see theirs

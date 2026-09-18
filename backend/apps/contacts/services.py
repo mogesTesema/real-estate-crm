@@ -107,6 +107,11 @@ def _validate_identity(contact_type, fields, *, existing=None):
 def create_contact(*, actor, roles=(), **fields):
     """Create a contact. `roles` is the set of hats they wear (SRS 3.2.2)."""
     _reject_unknown(fields)
+    if "custom_data" in fields:
+        # SRS 3.17.4 — validated against the core registry; a no-op while it is empty.
+        from apps.core.services import validate_custom_data
+
+        validate_custom_data("CONTACT", fields["custom_data"], partial=False)
     fields = _normalized(fields)
     contact_type = fields.get("contact_type") or Contact.ContactType.PERSON
     fields["contact_type"] = contact_type
@@ -122,6 +127,11 @@ def create_contact(*, actor, roles=(), **fields):
 def update_contact(contact, *, actor, roles=None, **fields):
     """Patch a contact. Only the fields passed are touched."""
     _reject_unknown(fields)
+    if "custom_data" in fields:
+        # SRS 3.17.4 — validated against the core registry; a no-op while it is empty.
+        from apps.core.services import validate_custom_data
+
+        validate_custom_data("CONTACT", fields["custom_data"], partial=True)
     fields = _normalized(fields)
     contact_type = fields.get("contact_type", contact.contact_type)
     _validate_identity(contact_type, fields, existing=contact)

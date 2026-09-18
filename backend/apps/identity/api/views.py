@@ -441,3 +441,143 @@ class RoleViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Gen
     queryset = Role.objects.all().order_by("code")
     serializer_class = RoleSerializer
     permission_classes = [IsAuthenticated, PasswordIsCurrent]
+
+
+# --- Permission-matrix admin (SRS 3.17.1/3.17.2) --------------------------------------------
+
+
+class PermissionViewSet(
+    mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet
+):
+    """The read-only permission catalogue. Rows are seeded by migration; admins grant and
+    revoke them per role next door, they do not invent codes here."""
+
+    filterset_fields = ["module"]
+    ordering = ["code"]
+
+    def get_permissions(self):
+        from ..permissions import HasPermission, IsAgencyAdmin
+
+        return [
+            *super().get_permissions(), IsAgencyAdmin(),
+            HasPermission("admin.roles_manage")(),
+        ]
+
+    def get_queryset(self):
+        from ..models import Permission
+
+        return Permission.objects.all()
+
+    def get_serializer_class(self):
+        from .serializers import PermissionSerializer
+
+        return PermissionSerializer
+
+
+class RolePermissionViewSet(
+    mixins.ListModelMixin, mixins.CreateModelMixin, mixins.DestroyModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Grant/revoke matrix rows (SRS 3.17.1). The seed reproduces day-one behavior; this
+    is where an admin tightens or widens it at runtime. Every change is audited."""
+
+    filterset_fields = ["role", "permission"]
+    ordering = ["role__code"]
+
+    def get_permissions(self):
+        from ..permissions import HasPermission, IsAgencyAdmin
+
+        return [
+            *super().get_permissions(), IsAgencyAdmin(),
+            HasPermission("admin.roles_manage")(),
+        ]
+
+    def get_queryset(self):
+        from ..models import RolePermission
+
+        return RolePermission.objects.select_related("role", "permission")
+
+    def get_serializer_class(self):
+        from .serializers import RolePermissionSerializer
+
+        return RolePermissionSerializer
+
+    def perform_create(self, serializer):
+        from .. import signals
+
+        row = serializer.save()
+        signals.role_permission_changed.send_robust(
+            sender=None, role=row.role, permission_code=row.permission.code,
+            granted=True, actor=self.request.user,
+        )
+
+    def perform_destroy(self, instance):
+        from .. import signals
+
+        signals.role_permission_changed.send_robust(
+            sender=None, role=instance.role, permission_code=instance.permission.code,
+            granted=False, actor=self.request.user,
+        )
+        instance.delete()
+
+
+class FieldPermissionViewSet(viewsets.ModelViewSet):
+    """Field-level rules (SRS 3.17.2). Absence of rows = READ_WRITE, so this surface is
+    inert until an admin writes the first row — no day-one behavior change."""
+
+    filterset_fields = ["role", "entity_type", "access_level"]
+    ordering = ["entity_type", "field_name"]
+
+    def get_permissions(self):
+        from ..permissions import HasPermission, IsAgencyAdmin
+
+        return [
+            *super().get_permissions(), IsAgencyAdmin(),
+            HasPermission("admin.field_permissions_manage")(),
+        ]
+
+    def get_queryset(self):
+        from ..models import FieldPermission
+
+        return FieldPermission.objects.select_related("role")
+
+    def get_serializer_class(self):
+        from .serializers import FieldPermissionSerializer
+
+        return FieldPermissionSerializer
+
+
+class CustomFieldViewSet(
+    mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin,
+    mixins.UpdateModelMixin, mixins.DestroyModelMixin, viewsets.GenericViewSet,
+):
+    """The custom-field registry (SRS 3.17.4). The MODEL lives in `core` (every domain's
+    `custom_data` validates against it); the HTTP surface lives here because `core` is the
+    kernel and may import no other app — not even the permission classes this admin
+    surface needs. DELETE deactivates: historical rows still carry the key, and a
+    validator that has forgotten a field cannot explain old data."""
+
+    filterset_fields = ["entity_type", "data_type", "is_active"]
+    ordering = ["entity_type", "sort_order", "key"]
+
+    def get_permissions(self):
+        from ..permissions import HasPermission, IsAgencyAdmin
+
+        return [
+            *super().get_permissions(), IsAgencyAdmin(),
+            HasPermission("admin.custom_fields_manage")(),
+        ]
+
+    def get_queryset(self):
+        from apps.core.models import CustomField
+
+        return CustomField.objects.all()
+
+    def get_serializer_class(self):
+        from .serializers import CustomFieldSerializer
+
+        return CustomFieldSerializer
+
+    def perform_destroy(self, instance):
+        instance.is_active = False
+        instance.save(update_fields=["is_active"])

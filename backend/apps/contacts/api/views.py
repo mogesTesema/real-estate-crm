@@ -117,7 +117,7 @@ class ContactViewSet(
         responses={201: ContactSerializer},
     )
     def create(self, request, *args, **kwargs):
-        payload = ContactWriteSerializer(data=request.data)
+        payload = ContactWriteSerializer(data=request.data, context={"request": request})
         payload.is_valid(raise_exception=True)
         data = dict(payload.validated_data)
         roles = data.pop("roles", ())
@@ -133,7 +133,8 @@ class ContactViewSet(
     def update(self, request, *args, **kwargs):
         contact = self.get_object()
         payload = ContactWriteSerializer(
-            instance=contact, data=request.data, partial=kwargs.pop("partial", False)
+            instance=contact, data=request.data, partial=kwargs.pop("partial", False),
+            context={"request": request},
         )
         payload.is_valid(raise_exception=True)
         data = dict(payload.validated_data)
@@ -300,6 +301,12 @@ class ContactViewSet(
     )
     @action(detail=False, methods=["get"])
     def export(self, request):
+        from apps.identity.permissions import HasPermission
+
+        # SRS 5.3 names export a privileged operation; the matrix code is seeded to every
+        # staff role today (behavior-preserving) and admins tighten it at runtime.
+        if not HasPermission("contacts.export")().has_permission(request, self):
+            self.permission_denied(request, message="contacts.export required")
         """Stream the caller's visible contacts as CSV (SRS 3.2.6, 3.13.4).
 
         Exactly the rows `GET /contacts/` would return with the same filters — an export that

@@ -248,6 +248,10 @@ SPECTACULAR_SETTINGS = {
         # Offer.direction (buyer/seller) vs Message/CallLog.direction (inbound/outbound).
         "OfferDirectionEnum": "apps.crm.models.Offer.Direction",
         "MessageDirectionEnum": "apps.collaboration.models.Message.Direction",
+        # Document AccessGrant (VIEW/DOWNLOAD/EDIT) vs FieldPermission
+        # (HIDDEN/READ_ONLY/READ_WRITE) — both fields are named access_level.
+        "DocumentAccessLevelEnum": "apps.collaboration.models.AccessGrant.AccessLevel",
+        "FieldAccessLevelEnum": "apps.identity.models.FieldPermission.AccessLevel",
     },
 }
 
@@ -333,6 +337,10 @@ ESIGN_TOKEN_MAX_AGE_DAYS = int(env("ESIGN_TOKEN_MAX_AGE_DAYS", "30"))
 # AI assistance (SRS 3.20): "mock" = the deterministic rule-based provider in
 # apps/crm/ai.py. A Claude API provider is documented in third-part-needed.md §17;
 # point AI_PROVIDER_CLASS at it once the anthropic SDK and key are in place.
+# SRS 3.17.4: with False (default) unknown custom_data keys pass through — ad-hoc JSON
+# predates the registry. Flip to True once the registry is the source of truth.
+CUSTOM_FIELD_STRICT = env_bool("CUSTOM_FIELD_STRICT", False)
+
 AI_PROVIDER = env("AI_PROVIDER", "mock")
 
 WEBHOOK_TRANSPORT = env("WEBHOOK_TRANSPORT", "urllib")

@@ -40,3 +40,73 @@ def next_reference(key, *, prefix=None, padding=6):
 
     body = str(row.current_value).zfill(row.padding)
     return f"{row.prefix}-{body}" if row.prefix else body
+
+
+def validate_custom_data(entity_type, data, *, partial=False):
+    """Validate an entity's ``custom_data`` against the CustomField registry (SRS 3.17.4).
+
+    Lenient by default — an EMPTY registry (today's state) validates everything, so the
+    call sites cost nothing until an admin registers fields. Unknown keys are refused only
+    under ``CUSTOM_FIELD_STRICT=True``: years of ad-hoc JSON may predate the registry, and
+    strictness is an opt-in migration, not a surprise.
+
+    ``partial`` skips required-field checks — a PATCH that doesn't mention a required key
+    is not removing it.
+    """
+    from django.conf import settings
+    from django.core.exceptions import ValidationError
+
+    from .models import CustomField
+
+    data = data or {}
+    fields = {
+        field.key: field
+        for field in CustomField.objects.filter(entity_type=entity_type, is_active=True)
+    }
+    errors = {}
+
+    if getattr(settings, "CUSTOM_FIELD_STRICT", False):
+        for key in set(data) - set(fields):
+            errors[key] = "Unknown custom field."
+
+    for key, field in fields.items():
+        if key not in data:
+            if field.is_required and not partial:
+                errors[key] = "This custom field is required."
+            continue
+        value = data[key]
+        if value is None:
+            if field.is_required:
+                errors[key] = "This custom field is required."
+            continue
+        kind = field.data_type
+        if kind == "TEXT" and not isinstance(value, str):
+            errors[key] = "Expected text."
+        elif kind == "NUMBER" and (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+        ):
+            errors[key] = "Expected a number."
+        elif kind == "BOOLEAN" and not isinstance(value, bool):
+            errors[key] = "Expected true or false."
+        elif kind == "DATE":
+            import datetime
+
+            if not isinstance(value, str):
+                errors[key] = "Expected an ISO date."
+            else:
+                try:
+                    datetime.date.fromisoformat(value)
+                except ValueError:
+                    errors[key] = "Expected an ISO date."
+        elif kind == "SINGLE_SELECT":
+            options = field.choices or []
+            if value not in options:
+                errors[key] = f"Pick one of {options}."
+        elif kind == "MULTI_SELECT":
+            options = field.choices or []
+            if not isinstance(value, list) or any(v not in options for v in value):
+                errors[key] = f"Pick from {options}."
+
+    if errors:
+        raise ValidationError(errors)
+    return data

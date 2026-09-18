@@ -68,3 +68,7 @@ user_login_failed = Signal()
 
 #: kwargs: user, actor  (actor is None for a self-service reset)
 password_changed = Signal()
+
+#: SRS 3.17.1 — matrix edits are audit-worthy. kwargs: role, permission_code, granted
+#: (bool), actor
+role_permission_changed = Signal()

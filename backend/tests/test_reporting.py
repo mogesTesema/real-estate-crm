@@ -104,12 +104,24 @@ class TestVisibility:
             f"/api/v1/saved-reports/{shared.pk}/", {"name": "Hijacked"}
         ).status_code == 403
 
-    def test_schedules_are_csv_only_for_now(self, db, auth_client, agent_user):
+    def test_schedules_are_csv_only_for_now(self, db, auth_client, agent_user, manager):
+        """Scheduling needs the `reports.schedule` matrix code (management/finance/
+        marketing by seed) — an agent is refused outright, a manager hits the
+        CSV-only rule."""
         report = SavedReport.objects.create(
             name="Mine", report_type="LEADS",
-            definition={"base": "leads"}, owner=agent_user,
+            definition={"base": "leads"}, owner=manager, visibility="ORG",
         )
-        response = auth_client(agent_user).post(
+        assert auth_client(agent_user).post(
+            "/api/v1/report-schedules/",
+            {
+                "saved_report": str(report.pk), "frequency": "DAILY",
+                "next_run_at": timezone.now().isoformat(),
+                "recipients": [], "export_format": "CSV",
+            },
+            format="json",
+        ).status_code == 403
+        response = auth_client(manager).post(
             "/api/v1/report-schedules/",
             {
                 "saved_report": str(report.pk), "frequency": "DAILY",

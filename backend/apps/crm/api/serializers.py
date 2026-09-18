@@ -6,7 +6,9 @@ Write serializers validate shape only; the lead engine and the deal state machin
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from apps.core.choices import ScopedEntityType
 from apps.core.serializers import ContactSummarySerializer, UserSummarySerializer
+from apps.identity.field_access import FieldPermissionSerializerMixin
 
 from ..models import (
     Deal,
@@ -54,7 +56,9 @@ class LeadAssignmentSerializer(serializers.ModelSerializer):
         fields = ("id", "from_user", "to_user", "assigned_by", "reason", "assigned_at")
 
 
-class LeadSerializer(serializers.ModelSerializer):
+class LeadSerializer(FieldPermissionSerializerMixin, serializers.ModelSerializer):
+    field_permission_entity = ScopedEntityType.LEAD
+
     contact = ContactSummarySerializer(read_only=True)
     assigned_agent = UserSummarySerializer(read_only=True)
     source = LeadSourceSerializer(read_only=True)
@@ -126,7 +130,9 @@ class LeadCaptureSerializer(serializers.Serializer):
         return attrs
 
 
-class LeadUpdateSerializer(serializers.ModelSerializer):
+class LeadUpdateSerializer(FieldPermissionSerializerMixin, serializers.ModelSerializer):
+    field_permission_entity = ScopedEntityType.LEAD
+
     class Meta:
         model = Lead
         fields = (
@@ -220,7 +226,9 @@ class DealStageHistorySerializer(serializers.ModelSerializer):
         )
 
 
-class DealSerializer(serializers.ModelSerializer):
+class DealSerializer(FieldPermissionSerializerMixin, serializers.ModelSerializer):
+    field_permission_entity = ScopedEntityType.DEAL
+
     owner = UserSummarySerializer(read_only=True)
     primary_contact = ContactSummarySerializer(read_only=True)
     stage = PipelineStageSerializer(read_only=True)
@@ -248,7 +256,9 @@ class DealSerializer(serializers.ModelSerializer):
         return (timezone.now() - obj.stage_entered_at).days if obj.stage_entered_at else None
 
 
-class DealWriteSerializer(serializers.ModelSerializer):
+class DealWriteSerializer(FieldPermissionSerializerMixin, serializers.ModelSerializer):
+    field_permission_entity = ScopedEntityType.DEAL
+
     class Meta:
         model = Deal
         fields = (
@@ -258,7 +268,9 @@ class DealWriteSerializer(serializers.ModelSerializer):
         )
 
 
-class DealUpdateSerializer(serializers.ModelSerializer):
+class DealUpdateSerializer(FieldPermissionSerializerMixin, serializers.ModelSerializer):
+    field_permission_entity = ScopedEntityType.DEAL
+
     class Meta:
         model = Deal
         fields = (

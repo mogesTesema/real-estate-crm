@@ -77,7 +77,7 @@ class LeaseViewSet(
 
     @extend_schema(request=LeaseWriteSerializer, responses={201: LeaseSerializer})
     def create(self, request, *args, **kwargs):
-        payload = LeaseWriteSerializer(data=request.data)
+        payload = LeaseWriteSerializer(data=request.data, context={"request": request})
         payload.is_valid(raise_exception=True)
         data = dict(payload.validated_data)
         parties = data.pop("parties", None)
@@ -91,7 +91,8 @@ class LeaseViewSet(
     def update(self, request, *args, **kwargs):
         lease = self.get_object()
         payload = LeaseWriteSerializer(
-            instance=lease, data=request.data, partial=kwargs.pop("partial", False)
+            instance=lease, data=request.data, partial=kwargs.pop("partial", False),
+            context={"request": request},
         )
         payload.is_valid(raise_exception=True)
         data = dict(payload.validated_data)

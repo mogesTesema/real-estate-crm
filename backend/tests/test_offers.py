@@ -197,9 +197,10 @@ class TestTransactionGate:
             )
 
     def test_the_api_cannot_create_transactions(self, db, auth_client, agent_user):
+        # 405 (no create route) or 403 (matrix code checked first) — either way, closed.
         assert auth_client(agent_user).post(
             "/api/v1/transactions/", {}
-        ).status_code == 405
+        ).status_code in (403, 405)
 
 
 class TestChecklists:

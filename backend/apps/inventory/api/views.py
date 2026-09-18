@@ -98,7 +98,7 @@ class PropertyViewSet(
 
     @extend_schema(request=PropertyWriteSerializer, responses={201: PropertySerializer})
     def create(self, request, *args, **kwargs):
-        payload = PropertyWriteSerializer(data=request.data)
+        payload = PropertyWriteSerializer(data=request.data, context={"request": request})
         payload.is_valid(raise_exception=True)
         try:
             prop = services.create_property(actor=request.user, **payload.validated_data)
@@ -110,7 +110,8 @@ class PropertyViewSet(
     def update(self, request, *args, **kwargs):
         prop = self.get_object()
         payload = PropertyWriteSerializer(
-            instance=prop, data=request.data, partial=kwargs.pop("partial", False)
+            instance=prop, data=request.data, partial=kwargs.pop("partial", False),
+            context={"request": request},
         )
         payload.is_valid(raise_exception=True)
         try:
@@ -308,7 +309,7 @@ class ListingViewSet(
 
     @extend_schema(request=ListingWriteSerializer, responses={201: ListingSerializer})
     def create(self, request, *args, **kwargs):
-        payload = ListingWriteSerializer(data=request.data)
+        payload = ListingWriteSerializer(data=request.data, context={"request": request})
         payload.is_valid(raise_exception=True)
         try:
             listing = services.create_listing(actor=request.user, **payload.validated_data)
@@ -320,7 +321,8 @@ class ListingViewSet(
     def update(self, request, *args, **kwargs):
         listing = self.get_object()
         payload = ListingWriteSerializer(
-            instance=listing, data=request.data, partial=kwargs.pop("partial", False)
+            instance=listing, data=request.data, partial=kwargs.pop("partial", False),
+            context={"request": request},
         )
         payload.is_valid(raise_exception=True)
         try:

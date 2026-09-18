@@ -200,7 +200,8 @@ class LeadViewSet(
     def update(self, request, *args, **kwargs):
         lead = self.get_object()
         payload = LeadUpdateSerializer(
-            instance=lead, data=request.data, partial=kwargs.pop("partial", False)
+            instance=lead, data=request.data, partial=kwargs.pop("partial", False),
+            context={"request": request},
         )
         payload.is_valid(raise_exception=True)
         try:
@@ -371,7 +372,7 @@ class DealViewSet(
 
     @extend_schema(request=DealWriteSerializer, responses={201: DealSerializer})
     def create(self, request, *args, **kwargs):
-        payload = DealWriteSerializer(data=request.data)
+        payload = DealWriteSerializer(data=request.data, context={"request": request})
         payload.is_valid(raise_exception=True)
         data = dict(payload.validated_data)
         pipeline = data.pop("pipeline")
@@ -388,7 +389,8 @@ class DealViewSet(
     def update(self, request, *args, **kwargs):
         deal = self.get_object()
         payload = DealUpdateSerializer(
-            instance=deal, data=request.data, partial=kwargs.pop("partial", False)
+            instance=deal, data=request.data, partial=kwargs.pop("partial", False),
+            context={"request": request},
         )
         payload.is_valid(raise_exception=True)
         try:
@@ -680,6 +682,17 @@ class FieldSessionViewSet(
     role, and every *supervisory* read of a trail writes an audit row.
     """
 
+    def get_permissions(self):
+        from apps.identity.permissions import HasPermission
+
+        base = super().get_permissions()
+        if self.action == "points" and self.request.method in ("GET", "HEAD"):
+            # SRS 3.16.7: reading a GPS trail is role-restricted (matrix code seeded
+            # all-staff — behavior-preserving; admins tighten at runtime) AND audited.
+            base.append(HasPermission("field_tracking.view_trails")())
+        return base
+
+
     scope_resource = "field_session"
     filterset_fields = ["status", "agent", "session_type"]
     ordering_fields = ["started_at", "ended_at"]
@@ -791,6 +804,15 @@ class OfferViewSet(
     is withdrawn or countered, which is how the negotiation history stays honest."""
 
     scope_resource = "offer"
+
+    def get_permissions(self):
+        from apps.identity.permissions import HasPermission
+
+        base = super().get_permissions()
+        if self.request.method not in ("GET", "HEAD", "OPTIONS"):
+            base.append(HasPermission("offers.manage")())
+        return base
+
     filterset_fields = ["deal", "property", "status", "direction"]
     ordering = ["-submitted_at"]
 
@@ -890,6 +912,15 @@ class TransactionViewSet(
     typed in by hand."""
 
     scope_resource = "transaction"
+
+    def get_permissions(self):
+        from apps.identity.permissions import HasPermission
+
+        base = super().get_permissions()
+        if self.request.method not in ("GET", "HEAD", "OPTIONS"):
+            base.append(HasPermission("transactions.manage")())
+        return base
+
     filterset_fields = ["deal", "property", "transaction_type", "status"]
     ordering = ["-transaction_date"]
 
@@ -932,6 +963,15 @@ class ClosingChecklistViewSet(
     viewsets.GenericViewSet,
 ):
     scope_resource = "closing_checklist"
+
+    def get_permissions(self):
+        from apps.identity.permissions import HasPermission
+
+        base = super().get_permissions()
+        if self.request.method not in ("GET", "HEAD", "OPTIONS"):
+            base.append(HasPermission("checklists.manage")())
+        return base
+
     filterset_fields = ["deal", "transaction", "checklist_type", "status"]
     ordering = ["-created_at"]
 
@@ -1110,11 +1150,11 @@ class CampaignViewSet(viewsets.ModelViewSet):
     ordering = ["-start_date"]
 
     def get_permissions(self):
-        from apps.identity.permissions import IsMarketingStaff, IsStaff
+        from apps.identity.permissions import HasPermission, IsMarketingStaff, IsStaff
 
         base = [*super().get_permissions(), IsStaff()]
         if self.request.method not in ("GET", "HEAD", "OPTIONS"):
-            base.append(IsMarketingStaff())
+            base += [IsMarketingStaff(), HasPermission("marketing.campaigns_manage")()]
         return base
 
     def get_queryset(self):
@@ -1234,11 +1274,11 @@ class LandingPageViewSet(viewsets.ModelViewSet):
     lookup_field = "slug"
 
     def get_permissions(self):
-        from apps.identity.permissions import IsMarketingStaff, IsStaff
+        from apps.identity.permissions import HasPermission, IsMarketingStaff, IsStaff
 
         base = [*super().get_permissions(), IsStaff()]
         if self.request.method not in ("GET", "HEAD", "OPTIONS"):
-            base.append(IsMarketingStaff())
+            base += [IsMarketingStaff(), HasPermission("marketing.pages_manage")()]
         return base
 
     def get_queryset(self):
@@ -1290,6 +1330,15 @@ class SavedSearchAlertViewSet(
     viewsets.GenericViewSet,
 ):
     scope_resource = "saved_search_alert"
+
+    def get_permissions(self):
+        from apps.identity.permissions import HasPermission
+
+        base = super().get_permissions()
+        if self.request.method not in ("GET", "HEAD", "OPTIONS"):
+            base.append(HasPermission("marketing.alerts_manage")())
+        return base
+
     filterset_fields = ["contact", "frequency", "channel", "is_active"]
     ordering = ["-created_at"]
 

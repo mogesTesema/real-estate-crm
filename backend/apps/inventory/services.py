@@ -209,6 +209,11 @@ def create_property(*, actor, status=None, **fields):
     """Create a property. `managed_by` is mandatory — SRS 3.3.10, and the anchor the
     MANAGED_PROPERTIES data scope resolves through."""
     _reject_unknown(fields, PROPERTY_WRITABLE, "property")
+    if "custom_data" in fields:
+        # SRS 3.17.4 — validated against the core registry; a no-op while it is empty.
+        from apps.core.services import validate_custom_data
+
+        validate_custom_data("PROPERTY", fields["custom_data"], partial=False)
     if not fields.get("managed_by"):
         raise ValidationError(
             {"managed_by": "Every property needs a Property Manager (SRS 3.3.10)."}
@@ -230,6 +235,11 @@ def update_property(prop, *, actor, **fields):
     """Patch a property. `status` is not settable here — it goes through `change_status`,
     which is what guarantees the history row and the legality check happen together."""
     _reject_unknown(fields, PROPERTY_WRITABLE, "property")
+    if "custom_data" in fields:
+        # SRS 3.17.4 — validated against the core registry; a no-op while it is empty.
+        from apps.core.services import validate_custom_data
+
+        validate_custom_data("PROPERTY", fields["custom_data"], partial=True)
     if "managed_by" in fields and not fields["managed_by"]:
         raise ValidationError(
             {"managed_by": "A property cannot be left without a Property Manager."}
@@ -378,6 +388,11 @@ def create_listing(*, actor, status=None, reference_code=None, **fields):
     both read the same maximum and the loser would hit the partial unique index.
     """
     _reject_unknown(fields, LISTING_WRITABLE, "listing")
+    if "custom_data" in fields:
+        # SRS 3.17.4 — validated against the core registry; a no-op while it is empty.
+        from apps.core.services import validate_custom_data
+
+        validate_custom_data("LISTING", fields["custom_data"], partial=False)
     _validate_agents(fields.get("assigned_agent"), fields.get("co_listing_agent"))
     _validate_unit_belongs(fields.get("property"), fields.get("unit"))
 
@@ -397,6 +412,11 @@ def create_listing(*, actor, status=None, reference_code=None, **fields):
 @transaction.atomic
 def update_listing(listing, *, actor, **fields):
     _reject_unknown(fields, LISTING_WRITABLE, "listing")
+    if "custom_data" in fields:
+        # SRS 3.17.4 — validated against the core registry; a no-op while it is empty.
+        from apps.core.services import validate_custom_data
+
+        validate_custom_data("LISTING", fields["custom_data"], partial=True)
     _validate_agents(
         fields.get("assigned_agent", listing.assigned_agent),
         fields.get("co_listing_agent", listing.co_listing_agent),

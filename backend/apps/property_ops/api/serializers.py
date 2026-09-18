@@ -5,7 +5,9 @@ deposit arithmetic all live in `property_ops.services`.
 """
 from rest_framework import serializers
 
+from apps.core.choices import ScopedEntityType
 from apps.core.serializers import ContactSummarySerializer, UserSummarySerializer
+from apps.identity.field_access import FieldPermissionSerializerMixin
 
 from ..models import Deposit, Lease, LeaseParty, RentSchedule
 
@@ -52,7 +54,9 @@ class DepositMovementSerializer(serializers.Serializer):
     notes = serializers.CharField(required=False, allow_blank=True)
 
 
-class LeaseSerializer(serializers.ModelSerializer):
+class LeaseSerializer(FieldPermissionSerializerMixin, serializers.ModelSerializer):
+    field_permission_entity = ScopedEntityType.LEASE
+
     tenant = ContactSummarySerializer(read_only=True)
     landlord = ContactSummarySerializer(read_only=True)
     property_manager = UserSummarySerializer(read_only=True)
@@ -65,7 +69,9 @@ class LeaseSerializer(serializers.ModelSerializer):
         read_only_fields = ("id", "reference_code", "status", "created_at", "updated_at")
 
 
-class LeaseWriteSerializer(serializers.ModelSerializer):
+class LeaseWriteSerializer(FieldPermissionSerializerMixin, serializers.ModelSerializer):
+    field_permission_entity = ScopedEntityType.LEASE
+
     parties = LeasePartySerializer(many=True, required=False)
 
     class Meta:

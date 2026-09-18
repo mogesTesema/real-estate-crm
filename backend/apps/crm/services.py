@@ -311,6 +311,11 @@ def capture_lead(
             actor=actor, roles=_roles_for(fields.get("lead_type")), **contact_data
         )
 
+    if "custom_data" in fields:
+        # SRS 3.17.4 — validated against the core registry; a no-op while it is empty.
+        from apps.core.services import validate_custom_data
+
+        validate_custom_data("LEAD", fields["custom_data"], partial=False)
     lead = Lead(contact=contact, created_by=actor, updated_by=actor, **fields)
     lead.is_possible_duplicate = is_possible_duplicate(
         contact, lead.lead_type, lead.target_property
@@ -543,6 +548,10 @@ def update_lead(lead, *, actor, **fields):
         raise ValidationError(
             {name: "This field cannot be set through update_lead()." for name in unknown}
         )
+    if "custom_data" in fields:
+        from apps.core.services import validate_custom_data
+
+        validate_custom_data("LEAD", fields["custom_data"], partial=True)
     for name, value in fields.items():
         setattr(lead, name, value)
     lead.updated_by = actor
@@ -635,6 +644,11 @@ def create_deal(*, actor, pipeline, stage=None, **fields):
     stage = stage or pipeline.stages.order_by("sort_order").first()
     if stage is None:
         raise ValidationError({"stage": "That pipeline has no stages."})
+    if "custom_data" in fields:
+        # SRS 3.17.4 — validated against the core registry; a no-op while it is empty.
+        from apps.core.services import validate_custom_data
+
+        validate_custom_data("DEAL", fields["custom_data"], partial=False)
     if stage.pipeline_id != pipeline.pk:
         raise ValidationError({"stage": "That stage belongs to a different pipeline."})
 
@@ -748,6 +762,10 @@ def update_deal(deal, *, actor, **fields):
             raise ValidationError(
                 {forbidden: "Use move_stage() — a stage change needs a reason (SRS 3.4.4)."}
             )
+    if "custom_data" in fields:
+        from apps.core.services import validate_custom_data
+
+        validate_custom_data("DEAL", fields["custom_data"], partial=True)
     for name, value in fields.items():
         setattr(deal, name, value)
     deal.updated_by = actor
