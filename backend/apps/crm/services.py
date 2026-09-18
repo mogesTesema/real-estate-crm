@@ -676,3 +676,271 @@ def link_property(deal, *, property, unit=None, is_primary=False, actor=None):
 @transaction.atomic
 def unlink_property(link, *, actor=None):
     link.delete()
+
+
+# --- Viewings (SRS 3.3.11, 3.16.4) ------------------------------------------------------------
+
+
+VIEWING_TRANSITIONS = {
+    "SCHEDULED": {"CONFIRMED", "COMPLETED", "CANCELLED", "NO_SHOW"},
+    "CONFIRMED": {"COMPLETED", "CANCELLED", "NO_SHOW"},
+    "COMPLETED": set(),
+    "CANCELLED": set(),
+    "NO_SHOW": set(),
+}
+
+
+@transaction.atomic
+def schedule_viewing(*, actor, property, contact, agent, scheduled_start, scheduled_end, **fields):
+    """Book a viewing and put it on the calendar (SRS 3.3.11).
+
+    The calendar entry is **not optional**. architecture.md §1.2 lists this as a required
+    orchestration and §13 forbids a standalone VIEWING activity, so the activity is created
+    here through `collaboration.services.upsert_activity_for_source` — one function, so a
+    reschedule updates the entry rather than adding a second one, and so the same rule holds
+    for inspections in a later pass without being re-implemented.
+    """
+
+    from .models import Viewing
+
+    if scheduled_end <= scheduled_start:
+        raise ValidationError({"scheduled_end": "A viewing must end after it starts."})
+
+    viewing = Viewing.objects.create(
+        property=property,
+        contact=contact,
+        agent=agent,
+        scheduled_start=scheduled_start,
+        scheduled_end=scheduled_end,
+        created_by=actor,
+        updated_by=actor,
+        **fields,
+    )
+    _sync_viewing_activity(viewing, actor=actor)
+    return viewing
+
+
+@transaction.atomic
+def reschedule_viewing(viewing, *, actor, scheduled_start, scheduled_end, location=None):
+    if scheduled_end <= scheduled_start:
+        raise ValidationError({"scheduled_end": "A viewing must end after it starts."})
+    if viewing.status in ("COMPLETED", "CANCELLED", "NO_SHOW"):
+        raise ValidationError({"status": f"A {viewing.status.lower()} viewing cannot move."})
+
+    viewing.scheduled_start = scheduled_start
+    viewing.scheduled_end = scheduled_end
+    fields = ["scheduled_start", "scheduled_end", "updated_by", "updated_at"]
+    if location is not None:
+        viewing.location = location
+        fields.append("location")
+    viewing.updated_by = actor
+    viewing.save(update_fields=fields)
+    _sync_viewing_activity(viewing, actor=actor)
+    return viewing
+
+
+def _sync_viewing_activity(viewing, *, actor):
+    """Mirror the viewing onto the unified calendar. Upsert, never insert."""
+    from apps.collaboration import services as collaboration_services
+    from apps.collaboration.models import Activity
+
+    collaboration_services.upsert_activity_for_source(
+        source_type=Activity.SourceType.VIEWING,
+        source_id=viewing.pk,
+        activity_type=Activity.ActivityType.VIEWING,
+        subject=f"Viewing: {viewing.property.title}",
+        assigned_to=viewing.agent,
+        actor=actor,
+        start_at=viewing.scheduled_start,
+        due_at=viewing.scheduled_end,
+        contact=viewing.contact,
+        lead=viewing.lead,
+        deal=viewing.deal,
+        property=viewing.property,
+    )
+
+
+@transaction.atomic
+def complete_viewing(viewing, *, actor, feedback=None, rating=None, status=None):
+    """Close a viewing out with the client's feedback (SRS 3.3.11).
+
+    Feedback is the point of the requirement — "record viewing feedback and ratings" — so it
+    is captured on the same call that closes the appointment rather than left to a separate
+    step nobody takes.
+    """
+    from apps.collaboration import services as collaboration_services
+    from apps.collaboration.models import Activity
+
+    from .models import Viewing
+
+    status = status or Viewing.Status.COMPLETED
+    allowed = VIEWING_TRANSITIONS.get(viewing.status, set())
+    if status not in allowed:
+        raise ValidationError(
+            {
+                "status": (
+                    f"Cannot move a viewing from {viewing.status} to {status}."
+                    + (f" Allowed: {sorted(allowed)}." if allowed else " It is already closed.")
+                )
+            }
+        )
+    if rating is not None and not (1 <= int(rating) <= 5):
+        raise ValidationError({"rating": "A rating is 1 to 5."})
+
+    viewing.status = status
+    fields = ["status", "updated_by", "updated_at"]
+    if feedback is not None:
+        viewing.feedback = feedback
+        fields.append("feedback")
+    if rating is not None:
+        viewing.rating = rating
+        fields.append("rating")
+    viewing.updated_by = actor
+    viewing.save(update_fields=fields)
+
+    collaboration_services.close_activity_for_source(
+        source_type=Activity.SourceType.VIEWING,
+        source_id=viewing.pk,
+        status=(
+            Activity.Status.COMPLETED
+            if status == Viewing.Status.COMPLETED
+            else Activity.Status.CANCELLED
+        ),
+        completed_at=timezone.now(),
+    )
+    return viewing
+
+
+@transaction.atomic
+def check_in_to_viewing(viewing, *, actor, latitude=None, longitude=None):
+    """Stamp the agent's arrival, with coordinates when the device offered them (SRS 3.16.4)."""
+    if viewing.agent_id != actor.pk:
+        raise ValidationError("Only the agent running a viewing can check in to it.")
+    if viewing.check_in_at:
+        return viewing
+    viewing.check_in_at = timezone.now()
+    viewing.check_in_latitude = latitude
+    viewing.check_in_longitude = longitude
+    viewing.save(
+        update_fields=[
+            "check_in_at", "check_in_latitude", "check_in_longitude", "updated_at",
+        ]
+    )
+    return viewing
+
+
+# --- GPS field tracking (SRS 3.16.5–3.16.7) -----------------------------------------------------
+
+
+@transaction.atomic
+def start_field_session(*, actor, agent=None, gps_enabled=False, **fields):
+    """Open a GPS-tracked field trip (SRS 3.16.5).
+
+    > "The System shall require sales officers to enable GPS tracking during field visits."
+
+    Refused when `gps_required` is set and the device has not enabled GPS. That is the
+    requirement's whole force: a session that opens without it is an untracked field visit
+    wearing a tracked visit's name, which is worse than no session at all — the record implies
+    a trail that does not exist.
+
+    An agent may only open a session for themselves; supervisors read trails, they do not
+    manufacture them.
+    """
+    from .models import AgentFieldSession
+
+    agent = agent or actor
+    if agent.pk != actor.pk:
+        raise ValidationError("A field session is opened by the agent making the visit.")
+
+    gps_required = fields.pop("gps_required", True)
+    if gps_required and not gps_enabled:
+        raise ValidationError(
+            {"gps_enabled": "Enable GPS before starting a field visit (SRS 3.16.5)."}
+        )
+    if AgentFieldSession.objects.filter(
+        agent=agent, status=AgentFieldSession.Status.ACTIVE
+    ).exists():
+        raise ValidationError("That agent already has an open field session.")
+
+    return AgentFieldSession.objects.create(
+        agent=agent,
+        started_at=fields.pop("started_at", None) or timezone.now(),
+        gps_required=gps_required,
+        gps_enabled=gps_enabled,
+        created_by=actor,
+        updated_by=actor,
+        **fields,
+    )
+
+
+@transaction.atomic
+def end_field_session(session, *, actor, notes=None):
+    from .models import AgentFieldSession
+
+    if session.status != AgentFieldSession.Status.ACTIVE:
+        return session
+    session.status = AgentFieldSession.Status.COMPLETED
+    session.ended_at = timezone.now()
+    fields = ["status", "ended_at", "updated_by", "updated_at"]
+    if notes is not None:
+        session.notes = notes
+        fields.append("notes")
+    session.updated_by = actor
+    session.save(update_fields=fields)
+    return session
+
+
+@transaction.atomic
+def record_location_points(session, *, actor, points):
+    """Append breadcrumbs to a session's trail (SRS 3.16.6).
+
+    Append-only at the database-role level: UPDATE and DELETE on `crm_agent_location_point`
+    are revoked from the application role, so a recorded trail cannot be quietly rewritten.
+    That is a guarantee about the *employee's* record as much as the company's.
+
+    Only the tracked agent may append. A supervisor writing points into someone else's trail
+    would make the trail evidence of nothing.
+    """
+    from django.contrib.gis.geos import Point
+
+    from .models import AgentFieldSession, AgentLocationPoint
+
+    if session.agent_id != actor.pk:
+        raise ValidationError("Only the tracked agent can add points to their own trail.")
+    if session.status != AgentFieldSession.Status.ACTIVE:
+        raise ValidationError("That field session is closed.")
+
+    rows = []
+    for point in points:
+        latitude = point["latitude"]
+        longitude = point["longitude"]
+        rows.append(
+            AgentLocationPoint(
+                session=session,
+                recorded_at=point.get("recorded_at") or timezone.now(),
+                latitude=latitude,
+                longitude=longitude,
+                accuracy_m=point.get("accuracy_m"),
+                geo_point=Point(float(longitude), float(latitude), srid=4326),
+                created_by=actor,
+            )
+        )
+    return AgentLocationPoint.objects.bulk_create(rows)
+
+
+def read_location_trail(session, *, actor):
+    """The session's breadcrumbs, recording that they were read (SRS 3.16.7).
+
+    > "Access to GPS tracks shall be role-restricted and audited."
+
+    Row scoping is the restriction; this is the audit, and without it the requirement is half
+    met. An agent reading their own trail is not audited — the control exists to make
+    *supervisory* access to an employee's location visible, and logging self-reads would bury
+    the ones that matter.
+    """
+    points = list(session.location_points.order_by("recorded_at"))
+    if session.agent_id != actor.pk:
+        signals.gps_track_accessed.send_robust(
+            sender=None, session=session, actor=actor, point_count=len(points)
+        )
+    return points

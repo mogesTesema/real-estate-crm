@@ -8,10 +8,12 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     DealPropertyViewSet,
     DealViewSet,
+    FieldSessionViewSet,
     LeadSourceViewSet,
     LeadViewSet,
     PipelineViewSet,
     RoutingRuleViewSet,
+    ViewingViewSet,
 )
 
 router = DefaultRouter()
@@ -21,5 +23,7 @@ router.register("deal-properties", DealPropertyViewSet, basename="deal-property"
 router.register("lead-sources", LeadSourceViewSet, basename="lead-source")
 router.register("routing-rules", RoutingRuleViewSet, basename="routing-rule")
 router.register("pipelines", PipelineViewSet, basename="pipeline")
+router.register("viewings", ViewingViewSet, basename="viewing")
+router.register("field-sessions", FieldSessionViewSet, basename="field-session")
 
 urlpatterns = [path("", include(router.urls))]

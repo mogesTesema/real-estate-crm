@@ -305,3 +305,108 @@ class BoardSerializer(serializers.Serializer):
     pipeline = PipelineSerializer(allow_null=True)
     stages = BoardStageSerializer(many=True)
     weighted_forecast = serializers.DecimalField(max_digits=18, decimal_places=2)
+
+
+# --- viewings (SRS 3.3.11) ---------------------------------------------------------------
+
+
+class ViewingSerializer(serializers.ModelSerializer):
+    agent = UserSummarySerializer(read_only=True)
+    contact = ContactSummarySerializer(read_only=True)
+    property_title = serializers.CharField(source="property.title", read_only=True)
+
+    class Meta:
+        from ..models import Viewing
+
+        model = Viewing
+        fields = "__all__"
+        read_only_fields = (
+            "id", "status", "check_in_at", "check_out_at", "check_in_latitude",
+            "check_in_longitude", "feedback", "rating", "created_at", "updated_at",
+        )
+
+
+class ViewingScheduleSerializer(serializers.Serializer):
+    property = serializers.UUIDField()
+    contact = serializers.UUIDField()
+    agent = serializers.UUIDField(required=False)
+    lead = serializers.UUIDField(required=False, allow_null=True)
+    deal = serializers.UUIDField(required=False, allow_null=True)
+    scheduled_start = serializers.DateTimeField()
+    scheduled_end = serializers.DateTimeField()
+    location = serializers.CharField(required=False, allow_blank=True)
+
+
+class ViewingRescheduleSerializer(serializers.Serializer):
+    scheduled_start = serializers.DateTimeField()
+    scheduled_end = serializers.DateTimeField()
+    location = serializers.CharField(required=False, allow_blank=True)
+
+
+class ViewingCompleteSerializer(serializers.Serializer):
+    """SRS 3.3.11 — "record viewing feedback and ratings". Captured on the call that closes
+    the appointment, rather than left to a separate step nobody takes."""
+
+    status = serializers.CharField(required=False)
+    feedback = serializers.CharField(required=False, allow_blank=True)
+    rating = serializers.IntegerField(required=False, min_value=1, max_value=5)
+
+
+class CheckInSerializer(serializers.Serializer):
+    latitude = serializers.DecimalField(max_digits=9, decimal_places=6, required=False)
+    longitude = serializers.DecimalField(max_digits=9, decimal_places=6, required=False)
+
+
+# --- GPS field tracking (SRS 3.16.5–3.16.7) -----------------------------------------------
+
+
+class LocationPointSerializer(serializers.Serializer):
+    recorded_at = serializers.DateTimeField(required=False)
+    latitude = serializers.DecimalField(max_digits=9, decimal_places=6)
+    longitude = serializers.DecimalField(max_digits=9, decimal_places=6)
+    accuracy_m = serializers.DecimalField(max_digits=8, decimal_places=2, required=False)
+
+
+class LocationPointReadSerializer(serializers.Serializer):
+    id = serializers.UUIDField(read_only=True)
+    recorded_at = serializers.DateTimeField(read_only=True)
+    latitude = serializers.DecimalField(max_digits=9, decimal_places=6, read_only=True)
+    longitude = serializers.DecimalField(max_digits=9, decimal_places=6, read_only=True)
+    accuracy_m = serializers.DecimalField(max_digits=8, decimal_places=2, read_only=True)
+
+
+class FieldSessionSerializer(serializers.ModelSerializer):
+    agent = UserSummarySerializer(read_only=True)
+    point_count = serializers.SerializerMethodField()
+
+    class Meta:
+        from ..models import AgentFieldSession
+
+        model = AgentFieldSession
+        fields = "__all__"
+        read_only_fields = ("id", "status", "ended_at", "created_at", "updated_at")
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_point_count(self, obj):
+        """The count, not the points. A list of sessions must not stream every breadcrumb of
+        every employee's day — the trail itself needs the audited detail endpoint."""
+        return obj.location_points.count()
+
+
+class StartFieldSessionSerializer(serializers.Serializer):
+    session_type = serializers.CharField()
+    gps_enabled = serializers.BooleanField(default=False)
+    gps_required = serializers.BooleanField(default=True)
+    lead = serializers.UUIDField(required=False, allow_null=True)
+    deal = serializers.UUIDField(required=False, allow_null=True)
+    property = serializers.UUIDField(required=False, allow_null=True)
+    viewing = serializers.UUIDField(required=False, allow_null=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class EndFieldSessionSerializer(serializers.Serializer):
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class AppendPointsSerializer(serializers.Serializer):
+    points = LocationPointSerializer(many=True)

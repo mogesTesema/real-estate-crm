@@ -488,3 +488,237 @@ class DealPropertyViewSet(
 
     def get_unscoped_queryset(self):
         return DealProperty.objects.select_related("deal", "property")
+
+
+class ViewingViewSet(
+    ScopedQuerysetMixin,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+    viewsets.GenericViewSet,
+):
+    """Property viewings (SRS 3.3.11).
+
+    Scheduling puts the appointment on the unified calendar through
+    `collaboration.services.upsert_activity_for_source` — §1.2 lists that as a required
+    orchestration, and §13 forbids a standalone VIEWING activity.
+    """
+
+    scope_resource = "viewing"
+    filterset_fields = ["status", "agent", "property", "deal", "lead"]
+    ordering_fields = ["scheduled_start", "created_at"]
+    ordering = ["-scheduled_start"]
+
+    def get_unscoped_queryset(self):
+        from ..models import Viewing
+
+        return Viewing.objects.select_related("property", "agent", "contact", "deal", "lead")
+
+    def get_serializer_class(self):
+        from .serializers import (
+            CheckInSerializer,
+            ViewingCompleteSerializer,
+            ViewingRescheduleSerializer,
+            ViewingScheduleSerializer,
+            ViewingSerializer,
+        )
+
+        return {
+            "create": ViewingScheduleSerializer,
+            "reschedule": ViewingRescheduleSerializer,
+            "complete": ViewingCompleteSerializer,
+            "check_in": CheckInSerializer,
+        }.get(self.action, ViewingSerializer)
+
+    def create(self, request, *args, **kwargs):
+        from apps.contacts.selectors import live_contacts
+        from apps.identity.selectors import visible_users
+        from apps.inventory.selectors import visible_properties
+
+        from .serializers import ViewingScheduleSerializer, ViewingSerializer
+
+        payload = ViewingScheduleSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        data = dict(payload.validated_data)
+
+        prop = get_object_or_404(visible_properties(request.user), pk=data.pop("property"))
+        contact = get_object_or_404(live_contacts(), pk=data.pop("contact"))
+        agent = (
+            get_object_or_404(visible_users(request.user), pk=data.pop("agent"))
+            if data.get("agent")
+            else request.user
+        )
+        data.pop("agent", None)
+        for key, queryset in (
+            ("lead", selectors.live_leads()),
+            ("deal", selectors.live_deals()),
+        ):
+            if data.get(key):
+                data[key] = get_object_or_404(queryset, pk=data[key])
+
+        try:
+            viewing = services.schedule_viewing(
+                actor=request.user, property=prop, contact=contact, agent=agent, **data
+            )
+        except Exception as exc:  # noqa: BLE001 - narrowed by _translate
+            _translate(exc)
+        return Response(ViewingSerializer(viewing).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def reschedule(self, request, pk=None):
+        """Move an appointment. The calendar entry is updated, never duplicated."""
+        from .serializers import ViewingRescheduleSerializer, ViewingSerializer
+
+        viewing = self.get_object()
+        payload = ViewingRescheduleSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            viewing = services.reschedule_viewing(
+                viewing, actor=request.user, **payload.validated_data
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(ViewingSerializer(viewing).data)
+
+    @action(detail=True, methods=["post"])
+    def complete(self, request, pk=None):
+        """Close the appointment out with the client's feedback (SRS 3.3.11)."""
+        from .serializers import ViewingCompleteSerializer, ViewingSerializer
+
+        viewing = self.get_object()
+        payload = ViewingCompleteSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            viewing = services.complete_viewing(
+                viewing, actor=request.user, **payload.validated_data
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(ViewingSerializer(viewing).data)
+
+    @action(detail=True, methods=["post"], url_path="check-in")
+    def check_in(self, request, pk=None):
+        """Stamp the agent's arrival, with coordinates when the device offered them (3.16.4)."""
+        from .serializers import CheckInSerializer, ViewingSerializer
+
+        viewing = self.get_object()
+        payload = CheckInSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            viewing = services.check_in_to_viewing(
+                viewing, actor=request.user, **payload.validated_data
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(ViewingSerializer(viewing).data)
+
+
+class FieldSessionViewSet(
+    ScopedQuerysetMixin,
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+    viewsets.GenericViewSet,
+):
+    """GPS-tracked field visits (SRS 3.16.5–3.16.7).
+
+    This is location data about an employee. Three controls apply and all three are needed:
+    row scoping decides whose sessions are visible, the trail is append-only at the database
+    role, and every *supervisory* read of a trail writes an audit row.
+    """
+
+    scope_resource = "field_session"
+    filterset_fields = ["status", "agent", "session_type"]
+    ordering_fields = ["started_at", "ended_at"]
+    ordering = ["-started_at"]
+
+    def get_unscoped_queryset(self):
+        from ..models import AgentFieldSession
+
+        return AgentFieldSession.objects.select_related("agent").prefetch_related(
+            "location_points"
+        )
+
+    def get_serializer_class(self):
+        from .serializers import (
+            AppendPointsSerializer,
+            EndFieldSessionSerializer,
+            FieldSessionSerializer,
+            StartFieldSessionSerializer,
+        )
+
+        return {
+            "create": StartFieldSessionSerializer,
+            "end": EndFieldSessionSerializer,
+            "points": AppendPointsSerializer,
+        }.get(self.action, FieldSessionSerializer)
+
+    def create(self, request, *args, **kwargs):
+        from .serializers import FieldSessionSerializer, StartFieldSessionSerializer
+
+        payload = StartFieldSessionSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        data = dict(payload.validated_data)
+        for key, queryset in (
+            ("lead", selectors.live_leads()),
+            ("deal", selectors.live_deals()),
+            ("viewing", selectors.visible_viewings(request.user)),
+        ):
+            if data.get(key):
+                data[key] = get_object_or_404(queryset, pk=data[key])
+            else:
+                data.pop(key, None)
+        if data.get("property"):
+            from apps.inventory.selectors import visible_properties
+
+            data["property"] = get_object_or_404(
+                visible_properties(request.user), pk=data["property"]
+            )
+        else:
+            data.pop("property", None)
+
+        try:
+            session = services.start_field_session(actor=request.user, **data)
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(FieldSessionSerializer(session).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def end(self, request, pk=None):
+        from .serializers import EndFieldSessionSerializer, FieldSessionSerializer
+
+        session = self.get_object()
+        payload = EndFieldSessionSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        session = services.end_field_session(
+            session, actor=request.user, **payload.validated_data
+        )
+        return Response(FieldSessionSerializer(session).data)
+
+    @extend_schema(methods=["GET"], responses={200: None})
+    @action(detail=True, methods=["get", "post"])
+    def points(self, request, pk=None):
+        """Append to, or read, the location trail.
+
+        A GET by anyone other than the tracked agent writes a `platform_audit_event` — SRS
+        3.16.7's "role-restricted **and audited**". Row scoping is the restriction; without
+        the audit the requirement is half met.
+        """
+        from .serializers import AppendPointsSerializer, LocationPointReadSerializer
+
+        session = self.get_object()
+        if request.method == "GET":
+            trail = services.read_location_trail(session, actor=request.user)
+            return Response(LocationPointReadSerializer(trail, many=True).data)
+
+        payload = AppendPointsSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            rows = services.record_location_points(
+                session, actor=request.user, points=payload.validated_data["points"]
+            )
+        except Exception as exc:  # noqa: BLE001
+            _translate(exc)
+        return Response(
+            {"recorded": len(rows)}, status=status.HTTP_201_CREATED
+        )
