@@ -1,0 +1,43 @@
+name: Mirror simbatechplc/real-estate-crm-backend -> main
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+# Needed so GITHUB_TOKEN may push to this repo.
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: simbatechplc/real-estate-crm-backend
+  UPSTREAM_BRANCH: main
+  DEPLOY_BRANCH: main
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify COMPANY_PAT is present
+        run: |
+          if [ -z "${{ secrets.COMPANY_PAT }}" ]; then
+            echo "::error::COMPANY_PAT secret is not set on this repository."
+            exit 1
+          fi
+
+      - name: Fetch upstream
+        run: |
+          git clone --bare \
+            "https://x-access-token:${{ secrets.COMPANY_PAT }}@github.com/${UPSTREAM}.git" \
+            upstream.git
+
+      - name: Push to deploy branch
+        working-directory: upstream.git
+        run: |
+          git push --force \
+            "https://x-access-token:${{ secrets.MIRROR_PAT || secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
+            "refs/heads/${UPSTREAM_BRANCH}:refs/heads/${DEPLOY_BRANCH}"
