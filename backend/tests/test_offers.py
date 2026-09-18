@@ -71,7 +71,9 @@ class TestOfferLifecycle:
         draft = make_offer(deal_with_property, amount=800000, submit=False)
 
         services.accept_offer(chosen, actor=agent_user)
-        rival.refresh_from_db(); draft.refresh_from_db(); chosen.refresh_from_db()
+        rival.refresh_from_db()
+        draft.refresh_from_db()
+        chosen.refresh_from_db()
         assert chosen.status == Offer.Status.ACCEPTED
         assert rival.status == Offer.Status.REJECTED
         assert draft.status == Offer.Status.REJECTED
@@ -118,7 +120,8 @@ class TestOfferLifecycle:
         )
         call_command("sweep_offers")
         call_command("sweep_offers")  # run-twice-changes-nothing
-        stale.refresh_from_db(); fresh.refresh_from_db()
+        stale.refresh_from_db()
+        fresh.refresh_from_db()
         assert stale.status == Offer.Status.EXPIRED
         assert fresh.status == Offer.Status.SUBMITTED
 

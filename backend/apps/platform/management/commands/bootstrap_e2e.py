@@ -16,7 +16,8 @@ class Command(BaseCommand):
         from apps.identity.models import Branch, Company, Role, Team, User, UserRole
 
         company, _ = Company.objects.get_or_create(
-            name="Walkthrough Realty", defaults={"legal_name": "Walkthrough Realty LLC", "default_currency": "AED"}
+            name="Walkthrough Realty",
+            defaults={"legal_name": "Walkthrough Realty LLC", "default_currency": "AED"},
         )
         branch, _ = Branch.objects.get_or_create(
             company=company, code="E2E", defaults={"name": "E2E Branch"}

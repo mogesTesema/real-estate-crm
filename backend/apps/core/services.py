@@ -83,7 +83,7 @@ def validate_custom_data(entity_type, data, *, partial=False):
         if kind == "TEXT" and not isinstance(value, str):
             errors[key] = "Expected text."
         elif kind == "NUMBER" and (
-            isinstance(value, bool) or not isinstance(value, (int, float))
+            isinstance(value, bool) or not isinstance(value, int | float)
         ):
             errors[key] = "Expected a number."
         elif kind == "BOOLEAN" and not isinstance(value, bool):

@@ -161,7 +161,7 @@ class TestInboundLeads:
 
 class TestOutboundWebhooks:
     def test_dispatch_signs_and_logs(self, db, admin):
-        hook = create_webhook(
+        create_webhook(
             actor=admin, event_type="lead.captured",
             target_url="https://example.test/hook", secret="s3cret",
         )

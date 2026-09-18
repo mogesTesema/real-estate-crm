@@ -115,7 +115,7 @@ class TestOwnerStatement:
         assert entry.amount == statement.net_payable
 
     def test_a_voided_expense_cannot_be_on_a_statement_and_vice_versa(self, world, fin):
-        statement = services.generate_owner_statement(
+        services.generate_owner_statement(
             actor=fin, owner_contact=world["landlord"],
             period_start="2026-01-01", period_end="2026-01-31",
         )
