@@ -8,7 +8,6 @@ from apps.finance import services
 from apps.finance.models import (
     Account,
     AccountEntry,
-    Commission,
     CommissionPlan,
     InstallmentMilestone,
 )

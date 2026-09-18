@@ -190,6 +190,8 @@ REST_FRAMEWORK = {
         # mail-flooding vector.
         "password_reset": env("PASSWORD_RESET_THROTTLE_RATE", "5/min"),
         "file_upload": env("FILE_UPLOAD_THROTTLE_RATE", "30/min"),
+        # Public token-URL signing: unauthenticated by design, so throttled by design.
+        "esign_public": env("ESIGN_PUBLIC_THROTTLE_RATE", "30/min"),
     },
 }
 
@@ -233,6 +235,10 @@ SPECTACULAR_SETTINGS = {
         "ScreeningCheckStatusEnum": "apps.property_ops.models.Application.CheckStatus",
         "LeadPriorityEnum": "apps.crm.models.Lead.Priority",
         "MaintenancePriorityEnum": "apps.property_ops.models.MaintenanceRequest.Priority",
+        # Thread.channel adds CALL/MIXED to the Message/Template EMAIL/SMS/WHATSAPP set;
+        # same field name, two choice sets.
+        "ThreadChannelEnum": "apps.collaboration.models.Thread.Channel",
+        "MessageChannelEnum": "apps.collaboration.models.Message.Channel",
     },
 }
 
@@ -307,6 +313,11 @@ FILE_UPLOAD_MAX_BYTES = int(env("FILE_UPLOAD_MAX_BYTES", str(25 * 1024 * 1024)))
 # EMAIL is real (Django mail). SMS/WhatsApp/push are logging mocks until real providers are
 # integrated — each mock's counterpart is documented in third-part-needed.md. Swapping is a
 # settings change: point the channel at any class implementing gateways.MessageGateway.
+# Where a signer's token URL points. Relative by default — the frontend composes its own
+# origin; set an absolute template (https://app.example.com/sign/{token}) in production.
+ESIGN_PUBLIC_URL_TEMPLATE = env("ESIGN_PUBLIC_URL_TEMPLATE", "/public/esign/{token}/")
+ESIGN_TOKEN_MAX_AGE_DAYS = int(env("ESIGN_TOKEN_MAX_AGE_DAYS", "30"))
+
 COLLABORATION_GATEWAYS = {
     "EMAIL": env("GATEWAY_EMAIL", "apps.collaboration.gateways.DjangoEmailGateway"),
     "SMS": env("GATEWAY_SMS", "apps.collaboration.gateways.LoggingSmsGateway"),

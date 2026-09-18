@@ -9,6 +9,7 @@ import logging
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.utils import timezone
 
 from ..models import Activity
 
@@ -148,3 +149,202 @@ def create_task_for_lease_expiry(lease):
     except Exception:  # noqa: BLE001
         logger.exception("Lease-expiry task creation failed for lease=%s", lease.pk)
         return None
+
+
+# --- Tasks and the calendar (SRS §3.12) ------------------------------------------------------
+
+ACTIVITY_TRANSITIONS = {
+    Activity.Status.OPEN: {
+        Activity.Status.IN_PROGRESS, Activity.Status.COMPLETED, Activity.Status.CANCELLED,
+    },
+    Activity.Status.IN_PROGRESS: {
+        Activity.Status.OPEN, Activity.Status.COMPLETED, Activity.Status.CANCELLED,
+    },
+    Activity.Status.COMPLETED: set(),
+    Activity.Status.CANCELLED: set(),
+}
+
+#: Types a user may create directly. VIEWING and INSPECTION exist only as mirrors of their
+#: domain records through the upsert path — §13's invariant.
+USER_CREATABLE_TYPES = frozenset(set(Activity.ActivityType.values) - {"VIEWING", "INSPECTION"})
+
+
+def _validate_rrule(rule, dtstart):
+    from dateutil.rrule import rrulestr
+
+    try:
+        rrulestr(rule, dtstart=dtstart)
+    except (ValueError, TypeError) as exc:
+        raise ValidationError(
+            {"recurrence_rule": f"Not a valid RFC 5545 RRULE: {exc}"}
+        ) from exc
+
+
+ACTIVITY_WRITABLE = frozenset(
+    {"activity_type", "subject", "description", "assigned_to", "start_at", "due_at",
+     "recurrence_rule", "reminder_minutes_before", "priority",
+     "contact", "lead", "deal", "property", "lease"}
+)
+
+
+@transaction.atomic
+def create_activity(*, actor, activity_type, subject, assigned_to=None, **fields):
+    """A task, call, meeting or reminder (SRS 3.12.1/3.12.4)."""
+    unknown = set(fields) - (ACTIVITY_WRITABLE - {"activity_type", "subject", "assigned_to"})
+    if unknown:
+        raise ValidationError(
+            {name: "This field cannot be set through the activity service."
+             for name in unknown}
+        )
+    if activity_type not in USER_CREATABLE_TYPES:
+        raise ValidationError(
+            {"activity_type": (
+                "VIEWING and INSPECTION activities are created by their domain records "
+                "(schedule the viewing/inspection instead)."
+            )}
+        )
+    start_at, due_at = fields.get("start_at"), fields.get("due_at")
+    if start_at and due_at and due_at < start_at:
+        raise ValidationError({"due_at": "A task cannot be due before it starts."})
+    if fields.get("recurrence_rule"):
+        _validate_rrule(fields["recurrence_rule"], start_at or due_at or timezone.now())
+
+    return Activity.objects.create(
+        activity_type=activity_type,
+        subject=subject,
+        assigned_to=assigned_to or actor,
+        created_by=actor,
+        **fields,
+    )
+
+
+@transaction.atomic
+def update_activity(activity, *, actor, **fields):
+    if activity.source_type:
+        raise ValidationError(
+            {"detail": "Reschedule the viewing/inspection, not its calendar mirror."}
+        )
+    unknown = set(fields) - ACTIVITY_WRITABLE
+    if unknown:
+        raise ValidationError(
+            {name: "This field cannot be set through the activity service."
+             for name in unknown}
+        )
+    if fields.get("activity_type") and fields["activity_type"] not in USER_CREATABLE_TYPES:
+        raise ValidationError({"activity_type": "Not a user-editable type."})
+    if fields.get("recurrence_rule"):
+        _validate_rrule(
+            fields["recurrence_rule"],
+            fields.get("start_at") or activity.start_at or timezone.now(),
+        )
+    for name, value in fields.items():
+        setattr(activity, name, value)
+    activity.save()
+    return activity
+
+
+@transaction.atomic
+def change_activity_status(activity, new_status, *, actor):
+    """Progress a task. Completing a recurring one materializes the next occurrence — no
+    scheduler needed: the completion IS the tick (SRS 3.12.4)."""
+    if new_status not in ACTIVITY_TRANSITIONS:
+        raise ValidationError({"status": f"Unknown activity status {new_status!r}."})
+    allowed = ACTIVITY_TRANSITIONS.get(activity.status, set())
+    if new_status == activity.status:
+        return activity, None
+    if new_status not in allowed:
+        raise ValidationError(
+            {"status": f"Cannot move a task from {activity.status} to {new_status}."}
+        )
+    activity.status = new_status
+    fields = ["status"]
+    if new_status == Activity.Status.COMPLETED:
+        activity.completed_at = timezone.now()
+        fields.append("completed_at")
+    activity.save(update_fields=fields)
+
+    next_occurrence = None
+    if (
+        new_status == Activity.Status.COMPLETED
+        and activity.recurrence_rule
+        and activity.source_type is None
+    ):
+        next_occurrence = _materialize_next_occurrence(activity)
+    return activity, next_occurrence
+
+
+def _materialize_next_occurrence(activity):
+    """Clone the task at its next RRULE date. A cancelled recurring task ends the chain —
+    documented behaviour, not an accident."""
+    from dateutil.rrule import rrulestr
+
+    anchor = activity.start_at or activity.due_at
+    if anchor is None:
+        return None
+    try:
+        rule = rrulestr(activity.recurrence_rule, dtstart=anchor)
+        next_start = rule.after(anchor)
+    except (ValueError, TypeError):
+        logger.exception("Bad stored RRULE on activity %s", activity.pk)
+        return None
+    if next_start is None:
+        return None
+    shift = next_start - anchor
+    return Activity.objects.create(
+        activity_type=activity.activity_type,
+        subject=activity.subject,
+        description=activity.description,
+        assigned_to=activity.assigned_to,
+        created_by=activity.created_by,
+        start_at=(activity.start_at + shift) if activity.start_at else None,
+        due_at=(activity.due_at + shift) if activity.due_at else None,
+        recurrence_rule=activity.recurrence_rule,
+        reminder_minutes_before=activity.reminder_minutes_before,
+        priority=activity.priority,
+        contact=activity.contact,
+        lead=activity.lead,
+        deal=activity.deal,
+        property=activity.property,
+        lease=activity.lease,
+        status=Activity.Status.OPEN,
+    )
+
+
+def sweep_activity_reminders(now=None):
+    """Send due task reminders (SRS 3.12.2). `reminder_sent_at` is the idempotency stamp —
+    two overlapping sweeps send at most one reminder per task."""
+    from datetime import timedelta
+
+    from django.db.models import F
+    from django.db.models.functions import Coalesce
+
+    from .notify import notify
+
+    now = now or timezone.now()
+    due = (
+        Activity.objects.filter(
+            status__in=(Activity.Status.OPEN, Activity.Status.IN_PROGRESS),
+            reminder_minutes_before__isnull=False,
+            reminder_sent_at__isnull=True,
+        )
+        .annotate(anchor=Coalesce(F("start_at"), F("due_at")))
+        .filter(anchor__isnull=False)
+        .select_related("assigned_to")
+    )
+    sent = []
+    for activity in due:
+        fire_at = activity.anchor - timedelta(minutes=activity.reminder_minutes_before)
+        if fire_at > now:
+            continue
+        notify(
+            recipient=activity.assigned_to,
+            type="TASK_DUE",
+            title=f"Due: {activity.subject}",
+            body=f"Scheduled for {activity.anchor:%Y-%m-%d %H:%M}.",
+            entity_type="ACTIVITY",
+            entity_id=activity.pk,
+        )
+        activity.reminder_sent_at = now
+        activity.save(update_fields=["reminder_sent_at"])
+        sent.append(activity.pk)
+    return sent
