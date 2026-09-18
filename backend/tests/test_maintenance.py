@@ -13,7 +13,6 @@ from apps.property_ops.models import (
     Lease,
     MaintenanceRequest,
     Renewal,
-    WorkOrder,
 )
 
 

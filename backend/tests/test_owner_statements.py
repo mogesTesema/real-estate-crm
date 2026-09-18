@@ -5,7 +5,7 @@ import pytest
 from django.core.exceptions import ValidationError
 
 from apps.finance import services
-from apps.finance.models import Account, Invoice, OwnerStatement, Payment
+from apps.finance.models import Account, Invoice, Payment
 from apps.property_ops import services as po_services
 from apps.property_ops.models import Lease
 
