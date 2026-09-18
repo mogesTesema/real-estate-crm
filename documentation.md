@@ -3,18 +3,151 @@
 Quick daily notes on what got done on the backend and where things stand. Frontend-only work
 is tracked in the frontend repo's own log and omitted here.
 
-**Current state:** the backend has been rebuilt against `architecture.md` v3.2, which
-restructures it into nine apps under a strict import DAG. The **schema is complete** (98
-tables, 256 foreign keys, verified against the spec) and the **`identity` API is live** —
-registration, JWT auth, user administration, and `apply_scope`. The other eight apps have
-models but no endpoints. The previous Phase-1 API is preserved at tag
-**`phase1-flat-layout`**.
+**Current state:** the backend has been rebuilt against `architecture.md` **v3.3**, which
+restructures it into nine apps under a strict import DAG. The **schema is complete** (100
+tables, closing seven gaps the SRS had no column for) and **register and login work for all
+eight roles**, portal clients included — with password reset, logout, and the audit trail SRS
+5.3 requires. **Row scoping now covers every Phase-1 domain resource**, so the endpoints that
+follow have somewhere legal to read from. The other eight apps have models and scoping rules
+but no endpoints yet. The previous Phase-1 API is preserved at tag **`phase1-flat-layout`**.
 
 Bootstrap with `createsuperuser` (it now attaches the `super_admin` role), create a Company
 and Branch in Django admin, then register everyone else via `POST /api/v1/users/`.
 
 The demo logins below no longer exist: `seed_demo` was part of the old layout and was removed
 with it. A new seed command arrives with the API pass.
+
+---
+
+## Day 15: Fri, Sep 18, 2026; schema gaps, and row scoping for every resource
+
+Groundwork for the Phase-1 CRM. Two things had to be true before any domain endpoint could be
+written, and neither was.
+
+**The spec had holes.** Reading the SRS against the schema we actually built turned up seven
+requirements with **no column or table to land in** — and it was implementing v3.2 faithfully
+that exposed them. The lead follow-up SLA (3.1.9), duplicate flagging (3.1.10/3.1.11) and the
+instant acknowledgment (3.1.12) had nowhere to record state. SRS 3.4.4 demands a *mandatory*
+reason and next action on every deal stage move; v3.2 defined status-history tables for leads
+and for properties and none for deals. SRS 3.4.7 wants properties linked to an opportunity,
+and §3's own entity diagram promised `Deal ├── Property/properties` while §9's table carried
+no such column — the document disagreed with itself. Co-listing (3.3.5) and owner mandate
+terms (3.3.9) were missing outright. And SRS 5.1 asks for search over a million records in one
+second, for which v3.2 named `pg_trgm` but specified no index.
+
+Fixed in the schema *and* in `architecture.md`, now v3.3 with a changelog table mapping each
+change to the requirement that forced it. Leaving the doc behind the code means the next
+module gets built from a document that is quietly wrong — and `tests/test_spec_coverage.py`
+parses that document.
+
+**Two bugs the tests found, not the review.**
+- `UNIQUE(deal, property, unit)` did nothing for whole-property links. `unit` is null there,
+  and Postgres treats nulls as distinct in a unique index, so the same property could be
+  attached to the same deal repeatedly. `NULLS NOT DISTINCT` (PG15+) is the fix.
+- Three attempts at the trigram indexes generated invalid or useless SQL before landing on
+  `GinIndex(fields=[...], opclasses=["gin_trgm_ops"])`. `OpClass(Upper("col"), ...)` produced
+  unbalanced parens, and the `UPPER()` wrapper was wrong anyway: `gin_trgm_ops` answers
+  `ILIKE` natively, so an expression index on `UPPER(col)` would never be used by the query it
+  was built for. Confirmed with `EXPLAIN` that the planner picks the index for infix `ILIKE`.
+
+**Row scoping, which was the actual blocker.** `apply_scope` registered exactly one resource —
+`"user"` — and raised on everything else. That is the right failure mode, and it also meant no
+domain endpoint could return a row. Replaced the hand-written predicate with a per-resource
+table of `data_scope → predicate`, registered by each app from `AppConfig.ready()`, since
+`identity` sits near the bottom of the DAG and may not name the models above it.
+
+Three things changed from the shape I had first sketched, each one a real leak avoided:
+
+- **`FINANCE_ALL` and `MARKETING_ALL` are not aliases for `ALL`.** The sketch kept one
+  `_AGENCY_WIDE` frozenset lumping the three together — reasoned about only for the people
+  directory, where it is defensible. §2 grants those two their own modules agency-wide and
+  everything else "per permission/grant". A generic builder consulting that set would have
+  handed marketing every lead in the company. Now each resource states, per scope, exactly
+  what it grants, and **a scope a resource does not mention grants nothing**.
+- **A lead has two anchors, not one.** Routing (SRS 3.1.5) may assign a lead to a *team* for
+  round-robin, leaving `assigned_agent_id` null. An `OWN` predicate written only against
+  `assigned_agent` hides the entire unclaimed pool from the agents meant to work it.
+- **Shares are unioned outside the role loop**, filtered on `expires_at`, through a
+  `(shared_with_user, entity_type)` index that did not exist. A share is a grant in its own
+  right — it has to reach a user whose roles grant nothing on that resource, which is the
+  whole point of the table.
+
+No `.distinct()`. Every to-many anchor renders as `pk IN (SELECT …)` rather than a JOIN, so
+the filter cannot multiply rows and pagination's `COUNT(*)` does not pay for a `DISTINCT`. The
+invariant is held by tests instead of by a blanket call, because the cost of being wrong —
+duplicate rows in a paginated list — reads as missing data, not as a scoping bug.
+
+`ScopedQuerysetMixin` refuses a view that declares no resource, and refuses **at import time**
+a view that overrides `get_queryset`. Overriding it is the obvious way to add `select_related`
+and the one edit that silently removes scoping, because the subclass method wins the MRO.
+
+**DoD**
+- 381 tests (was 298). 73 of them are scoping: every resource against every `data_scope`,
+  share expiry, portal isolation in both directions, and the no-duplicate-rows invariant.
+- 15/15 import contracts kept — the proof that registering from `ready()` did not smuggle a
+  domain import into `identity`.
+- Rental-tenant isolation tested directly: a portal tenant sees their own lease and the ones
+  they are a co-tenant on, and nothing else; suspending the profile takes the rows back.
+
+---
+
+## Day 14: Fri, Sep 18, 2026; portal clients, password reset, logout, audit
+
+Finished register and login for all eight roles — this time working from
+`full-featured-web-based-real-estate-crm-srs.md` and
+`Real-Estate-CRM-Complete-User-Role-Definitions.md` directly. Both had been sitting untracked
+in the repo root the whole time while being the authority `architecture.md` derives from;
+they are now committed.
+
+**Reading the sources changed two decisions.**
+- SRS 3.15.2 delegates exactly two registration steps — managers register owners, owners
+  register agents. The "admin fallback" that also let owners create property managers,
+  marketing and finance staff was mine, invented before I had the documents. Removed;
+  those three sit with Super Admin, whose 3.15.1 remit is company-wide user governance.
+- Role Definitions §4 puts portal invitation under the Sales/Leasing Agent ("Invite portal
+  access only for clients with completed contracts") and §5 gives the Property Manager tenant
+  onboarding. That settled who may invite whom far better than my guess would have.
+
+**The portal, and the DAG problem it posed.** A client's login is gated on a completed
+contract (SRS 3.11.2), but contracts live in `crm` and `property_ops`, which `identity` may
+not import. Solved by inverting the dependency: `identity` defines signals and sends them,
+the domain apps answer from receivers connected in `apps.py::ready()`. The import arrow
+points the legal way and `lint-imports` staying at 15/15 is the proof. **Silence is
+refusal** — an uninstalled app, a missing contract, a contract in the wrong state and a
+contact unconnected to it all look identical from `identity`, and all mean no.
+
+The same inversion then solved the audit gap flagged on Day 13, which was blocked by exactly
+the same constraint. One mechanism, two problems.
+
+**Eligibility, read off the real enums rather than paraphrased.** A lease counts when ACTIVE,
+EXPIRING or RENEWED — deliberately *narrower* than `Lease.OCCUPYING_STATUSES`, which includes
+PENDING_SIGNATURE. That constant is right for the double-letting exclusion it was written
+for and wrong here: the SRS says "signed", and awaiting signature is not signed. Being party
+to the contract is checked too — a co-tenant qualifies (architecture.md §2 says
+"tenant/**party**"), a guarantor does not.
+
+**Two test-infrastructure bugs worth recording.**
+- Throttling was silently self-throttling the suite. Hundreds of logins share one LocMem
+  counter, so whichever test happened to run last failed — a flake with nothing to do with
+  the code under test. Disabled in test settings (with the scopes still *present*: a missing
+  scope raises rather than meaning unlimited) and covered properly in `test_throttling.py`,
+  which patches the class attribute, since DRF binds `THROTTLE_RATES` at import and
+  `override_settings` cannot reach it.
+- An audit-cleanup fixture tried `DELETE` on `platform_audit_event` and got "permission
+  denied". That is the append-only guarantee working exactly as designed; the fixture was
+  wrong. Per-test transaction rollback needs no privilege.
+
+Also: a silent `str.replace` in a bulk edit didn't match after an earlier edit shifted its
+anchor, so the `user_registered` signal never landed and only one audit test caught it.
+Assert on every programmatic replacement.
+
+**DoD**
+- 298 tests (was 219). The portal file alone covers the invite matrix, every contract status
+  on both sides, fail-closed behaviour, and client isolation in both directions.
+- Walked the lifecycle against a running server: PM registered → tenant invited against a
+  real ACTIVE lease → client logs in, forced to choose her own password, sees zero staff,
+  cannot register anyone → access revoked → login stops → record survives as SUSPENDED. The
+  audit table held all twelve events, including the failed logins with no actor.
 
 ---
 
@@ -144,11 +277,7 @@ the repo back to a state where `migrate` is meaningful.
   `selectors.py`, `tasks.py`, `api/` — across all nine apps, plus the normative `models/`
   packages for the three fat apps (`crm`, `property_ops`, `collaboration`).
 - Wired **import-linter** contracts into CI. The §1.2 matrix is not a pure layering
-  (`collaboration`/`platform` are satellites everyone calls, and `crm` ↔ `property_ops` isail so soft-deleting a user frees the address. I kept the partial index and silenced the check — with the consequence documented, since every email lookup must now filter deleted_at.
-
-A real deployment hazard fixed in passing: the app DB role was named three different things across compose, CI, and settings, and db_policy reads that name at migrate time to build the append-only REVOKEs. The mismatch would have revoked from a role nobody connects as, leaving the four immutable tables quietly mutable.
-
-What is deliberately
+  (`collaboration`/`platform` are satellites everyone calls, and `crm` ↔ `property_ops` is
   bidirectional by design), so the contracts encode the parts that are absolute: the
   `core → identity → contacts → inventory` spine, the ban on importing another app's `api/`,
   and the ban on satellites calling domain write services.
