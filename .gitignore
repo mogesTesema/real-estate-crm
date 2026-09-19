@@ -17,3 +17,8 @@ celerybeat-schedule.*
 .DS_Store
 .idea/
 .vscode/
+
+# Private client docs — kept in ../simbatech-docs, never committed
+third-part-needed.md
+full-featured-web-based-real-estate-crm-srs.md
+Real-Estate-CRM-Complete-User-Role-Definitions.md

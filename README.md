@@ -165,7 +165,6 @@ settings at migrate time.
 ```
 architecture.md         The specification (v3.4). Read the owning section before touching an app.
 architecture-review.md  The review that produced v3.2's corrections.
-third-part-needed.md    Every mocked integration: seam, real provider, env vars, cut-over.
 documentation.md        Daily progress log.
 backend/                Django project (config/) + the nine apps under apps/
 backend/scripts/        e2e_walkthrough.py — the live-server smoke story
